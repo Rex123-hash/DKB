@@ -40,6 +40,4 @@ pip install -r requirements.txt
 
 Configuration goes in a local `.env` file. A sample is provided in `.env.example`.
 
-## Team
 
-Built by the DukanBook intern team.
