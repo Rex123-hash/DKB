@@ -1,0 +1,17 @@
+# Python
+__pycache__/
+*.pyc
+
+# Virtual environment
+.venv/
+
+# Local database
+dukanbook.db
+
+# Secrets and local config
+.env
+.streamlit/secrets.toml
+
+# Editor folders
+.vscode/
+.idea/

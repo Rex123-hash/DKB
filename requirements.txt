@@ -1,0 +1,12 @@
+fastapi
+uvicorn[standard]
+streamlit
+requests
+httpx
+python-dotenv
+python-multipart
+fastembed
+numpy
+faster-whisper
+edge-tts
+pytest
