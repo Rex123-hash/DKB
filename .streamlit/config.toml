@@ -1,0 +1,12 @@
+# Dukanbook ledger ("bahi-khata") theme.
+# HARD RULE: no purple / violet / blue / neon "AI" colors.
+[theme]
+base = "light"
+primaryColor = "#1F6E43"             # deep ledger green
+backgroundColor = "#FBF7EF"          # warm cream paper
+secondaryBackgroundColor = "#F2E9D8" # aged paper panel
+textColor = "#2B2620"                # charcoal / dark brown
+font = "serif"
+
+[server]
+headless = true
