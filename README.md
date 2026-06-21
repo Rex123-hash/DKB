@@ -34,10 +34,20 @@ reliable.
 
 ## Running it
 
+Install the requirements once:
+
 ```
 pip install -r requirements.txt
 ```
 
-Configuration goes in a local `.env` file. A sample is provided in `.env.example`.
+Then start the app:
+
+```
+python run.py
+```
+
+This starts the backend and the screens together and opens it in your browser. The voice
+part runs on local libraries, so it needs no key. To turn on the smart answers, add your
+model key in a `.env` file (a sample is given in `.env.example`).
 
 
