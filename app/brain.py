@@ -7,11 +7,93 @@ working. Both paths call the SAME tools, so the ledger behaviour is identical.
 """
 from __future__ import annotations
 
+import re
+from datetime import datetime
+
 from app import config, db, llm, rag, tools
 from app import parser as _parser
 
+# --- general / small-talk replies (handled before the ledger or knowledge logic) ---
+_GREET = {"hi", "hii", "hiii", "hello", "helo", "hlo", "hey", "heyy", "namaste",
+          "namaskar", "namastey", "namaskaar", "salaam", "salam", "yo", "hola"}
+_THANKS = {"thanks", "thank", "thanku", "thankyou", "thx", "shukriya", "shukria",
+           "dhanyawad", "dhanyavad"}
+_BYE = {"bye", "byee", "goodbye", "alvida", "tata"}
+_OK = {"ok", "okay", "okie", "theek", "thik", "acha", "achha", "hmm", "hmmm"}
 
-def respond(message: str, lang: str = "auto", conn=None) -> str:
+_REPLY_GREET = (
+    "Namaste! 🙏 Main aapki dukaan ka hisaab rakhne mein madad karta hoon. "
+    "Aap bol ya likh sakte hain — jaise ‘Ramesh ko 500 udhaar likho’ ya ‘Ramesh kitna baaki hai’."
+)
+_REPLY_THANKS = "Koi baat nahi! 🙏 Aur kuch likhna ho to bataiye."
+_REPLY_BYE = "Theek hai, phir milte hain! 🙏"
+_REPLY_OK = "👍 Bataiye, kya likhna hai?"
+_REPLY_HOWRU = "Main bilkul theek hoon, shukriya! 😊 Bataiye, aaj kaunsa hisaab likhna hai?"
+_REPLY_WHO = (
+    "Main Dukanbook ka AI munshi hoon. Aapka khaata (udhaar aur jama), balance, reminders, "
+    "aur GST/tax/business sawaalon mein madad karta hoon — Hindi, English ya Hinglish mein."
+)
+_REPLY_CAP = (
+    "Main ye sab kar sakta hoon:\n"
+    "• Khaata likhna — ‘Ramesh ko 500 udhaar likho’, ‘Suresh ne 200 jama kiye’\n"
+    "• Balance dekhna — ‘Ramesh kitna baaki hai’\n"
+    "• Saare khaate dikhana — ‘saare customers dikhao’\n"
+    "• Reminder lagana — ‘Ramesh ko kal payment ke liye yaad dilana’\n"
+    "• GST, tax, loan, licence aur business sawaal — ‘GST kab register karna padta hai?’"
+)
+
+
+def _smalltalk(message: str) -> str | None:
+    """Return a canned reply for greetings/small-talk, else None."""
+    t = re.sub(r"[^\w\s]", " ", message.strip().lower())
+    words = t.split()
+    if not words:
+        return None
+    w = set(words)
+    short = len(words) <= 4
+    if any(p in t for p in ("what can you do", "kya kar sakte", "kya karte ho",
+                            "tum kya kar", "aap kya kar", "help karo", "madad chahiye")):
+        return _REPLY_CAP
+    if any(p in t for p in ("who are you", "kaun ho", "tum kaun", "aap kaun",
+                            "tumhara naam", "your name", "what are you")):
+        return _REPLY_WHO
+    if any(p in t for p in ("how are you", "kaise ho", "kaise hain", "kya haal",
+                            "kya hal", "how r u")):
+        return _REPLY_HOWRU
+    if short and (w & _GREET or "good morning" in t or "good evening" in t
+                  or "good afternoon" in t or "ram ram" in t):
+        return _REPLY_GREET
+    if (w & _THANKS) or "thank you" in t:
+        return _REPLY_THANKS
+    if short and ((w & _BYE) or "good night" in t or "good bye" in t):
+        return _REPLY_BYE
+    if short and (w & _OK):
+        return _REPLY_OK
+    return None
+
+
+# --- multi-turn conversation state (account-creation phone capture) ---
+# Keyed by session_id. Holds at most one pending action per session:
+#   {"awaiting": "phone", "queue": [{"id","name"}, ...], "retried": bool}
+# In-memory only — fine for a single-shopkeeper prototype; lost on restart.
+_SESSIONS: dict[str, dict] = {}
+
+_SKIP_WORDS = {"skip", "chhodo", "chhod", "chhoddo", "baad", "rehne", "nahi",
+               "nahin", "no", "aage", "na"}
+
+# Guided call-reminder ("maango") dialog: name -> [number] -> purpose -> time.
+# Roman 'maang' covers maango/maangna/maangne; Devanagari मांग/माँग covers voice input.
+_COLLECT_WORDS = ("maang", "मांग", "माँग", "paise lene", "payment maang")
+_REMINDER_STEPS = ("reminder_phone", "reminder_purpose", "reminder_time")
+_CANCEL_PHRASES = {"cancel", "rehne do", "chhod do", "band karo", "ruko", "cancel karo"}
+
+
+def _is_collect(text: str) -> bool:
+    """True for a 'go collect money' request that starts the guided reminder flow."""
+    return any(w in text for w in _COLLECT_WORDS)
+
+
+def respond(message: str, lang: str = "auto", conn=None, session_id: str = "default") -> str:
     if not (message or "").strip():
         return "Namaste! 🙏 Boliye ya likhiye — jaise ‘Ramesh ko 500 udhaar likho’ ya ‘Ramesh kitna baaki hai’."
 
@@ -20,15 +102,225 @@ def respond(message: str, lang: str = "auto", conn=None) -> str:
         conn = db.get_connection()
         db.init_db(conn)
     try:
+        # 1. Are we mid sub-dialog for this session? Handle it first so a bare
+        #    number / 'skip' / free-text answer is treated as the reply, not a
+        #    new command.
+        state = _SESSIONS.get(session_id)
+        if state:
+            awaiting = state.get("awaiting")
+            if awaiting == "phone":
+                handled = _handle_phone_capture(state, message, conn, session_id)
+                if handled is not None:
+                    return handled
+                # else: escape hatch fired (state cleared) — process normally
+            elif awaiting in _REMINDER_STEPS:
+                return _handle_reminder_dialog(state, message, conn, session_id)
+
+        smalltalk = _smalltalk(message)
+        if smalltalk is not None:
+            return smalltalk
+
+        # 2. Guided "maango" call-reminder flow — deterministic so it works with
+        #    or without an LLM, and never mis-recorded as a ledger entry.
+        if _is_collect(message):
+            return _start_collect(message, conn, session_id)
+
+        # 3. Account creation is handled deterministically (works with or
+        #    without an LLM key), then hands off to the phone sub-dialog.
+        intent = _parser.parse(message)
+        if intent.action == "create":
+            return _start_create(intent, conn, session_id)
+        if intent.action == "set_phone":
+            return _handle_set_phone(intent, conn)
+
+        # 3. Everything else: LLM brain if a key is set, else the offline path.
         if config.has_llm():
             try:
-                return llm.run(message, conn, lang)
+                created: list[dict] = []
+                reply = llm.run(message, conn, lang, created_sink=created)
+                # If the LLM opened account(s) (e.g. a phrasing the parser missed,
+                # like a typo'd "craete"), take over with our phone sub-dialog so
+                # the follow-up is consistent with the deterministic path.
+                if created:
+                    return _begin_phone_capture(created, session_id)
+                return reply
             except Exception:
                 pass  # graceful fallback to the offline path
         return _offline_respond(message, conn)
     finally:
         if own_conn:
             conn.close()
+
+
+def _ask_phone(name: str, nxt: bool = False) -> str:
+    lead = "Ab " if nxt else ""
+    return f"{lead}{name} ka phone number bataiye? (ya ‘skip’ boliye)"
+
+
+def _start_create(intent, conn, session_id: str) -> str:
+    names = intent.names or []
+    if not names:
+        return "Kis ka khaata banaun? Naam bataiye — jaise ‘Ramesh ka khaata banao’."
+
+    res = tools.create_accounts(conn, names, intent.party_type)
+    created, existing = res["created"], res["existing"]
+
+    if not created:
+        joined = ", ".join(existing)
+        return f"“{joined}” ka khaata to pehle se hai 🙂."
+
+    queue = list(created)
+    extra = ""
+    # An inline phone applies to the first created account.
+    if intent.phone:
+        first = queue.pop(0)
+        r = tools.set_phone(conn, first["name"], intent.phone)
+        if "error" in r:
+            queue.insert(0, first)  # invalid -> ask for it normally
+        else:
+            extra = f" {first['name']} ka number bhi save kar liya."
+
+    if not queue:  # everything had an inline phone already
+        _SESSIONS.pop(session_id, None)
+        return _fmt_created(created, existing) + extra
+    _SESSIONS[session_id] = {"awaiting": "phone", "queue": queue, "retried": False}
+    return _fmt_created(created, existing) + extra + " " + _ask_phone(queue[0]["name"])
+
+
+def _handle_set_phone(intent, conn) -> str:
+    """Set/update the phone for an existing party (works with or without the LLM)."""
+    if not intent.party:
+        return "Kis ka phone number save karun? Naam bataiye — jaise ‘Ramesh ka phone 9876543210’."
+    res = tools.set_phone(conn, intent.party, intent.phone or "")
+    if res.get("error") == "not_found":
+        return f"“{intent.party}” naam ka koi khaata nahi mila. Pehle khaata banaiye."
+    if res.get("error") == "invalid_phone":
+        return f"Yeh number theek nahi laga 🤔. {intent.party} ka 10-digit mobile number bataiye."
+    return f"✅ {res['party']} ka phone number save ho gaya: {res['phone']}."
+
+
+def _begin_phone_capture(created: list[dict], session_id: str) -> str:
+    """Start the phone sub-dialog for accounts the LLM just created."""
+    _SESSIONS[session_id] = {"awaiting": "phone", "queue": list(created), "retried": False}
+    return _fmt_created(created, []) + " " + _ask_phone(created[0]["name"])
+
+
+def _fmt_created(created: list[dict], existing: list[str]) -> str:
+    names = ", ".join(c["name"] for c in created)
+    n = len(created)
+    head = (f"✅ Naya khaata ban gaya: {names}." if n == 1
+            else f"✅ {n} naye khaate ban gaye: {names}.")
+    if existing:
+        head += f" ({', '.join(existing)} pehle se the.)"
+    return head
+
+
+def _advance(state: dict, session_id: str, prefix: str) -> str:
+    """Drop the current name and prompt for the next, or finish."""
+    state["queue"].pop(0)
+    state["retried"] = False
+    if state["queue"]:
+        return f"{prefix} {_ask_phone(state['queue'][0]['name'], nxt=True)}"
+    _SESSIONS.pop(session_id, None)
+    return f"{prefix} ✅ Ho gaya! Saare khaate taiyaar hain."
+
+
+def _handle_phone_capture(state: dict, message: str, conn, session_id: str) -> str | None:
+    """Interpret a reply during phone capture. Returns a reply string, or None
+    to signal the escape hatch (state cleared; caller processes normally)."""
+    current = state["queue"][0]
+    phone = tools.normalize_phone(message)
+    if phone:
+        tools.set_phone(conn, current["name"], message)
+        return _advance(state, session_id, f"✅ {current['name']} ka number save ho gaya.")
+
+    tokens = re.sub(r"[^\w\s]", " ", message.lower()).split()
+    if any(t in _SKIP_WORDS for t in tokens):
+        return _advance(state, session_id, f"Theek hai, {current['name']} ko abhi chhod diya.")
+
+    digits = re.sub(r"\D", "", message)
+    letters = re.sub(r"[^A-Za-zऀ-ॿ]", "", message)
+    # A digit-heavy reply with almost no letters is a bad number attempt, not a
+    # command — re-ask once, then move on. (Checked before the command escape so
+    # a bare invalid number isn't mistaken for an amount/ledger command.)
+    if len(digits) >= 5 and len(letters) <= 2:
+        if not state.get("retried"):
+            state["retried"] = True
+            return (f"Yeh number theek nahi laga 🤔. {current['name']} ka 10-digit "
+                    "mobile number dobara bataiye (ya ‘skip’).")
+        return _advance(state, session_id, f"{current['name']} ka number samajh nahi aaya, abhi chhod diya.")
+
+    # A clear command (ledger/balance/list/create) cancels capture — never trap.
+    if _parser.parse(message).action != "unknown":
+        _SESSIONS.pop(session_id, None)
+        return None
+
+    # Anything else: don't trap the user — abandon capture and process normally.
+    _SESSIONS.pop(session_id, None)
+    return None
+
+
+def _ask_purpose(r: dict) -> str:
+    """Ask the reason for the call, confirming the number when we have it."""
+    amt = f"₹{r['amount']:.0f} " if r.get("amount") else ""
+    num = f" jinka number {r['phone']} hai" if r.get("phone") else ""
+    return f"{r['name']}{num}, unse {amt}maangne ka purpose kya hai? 🙂"
+
+
+def _start_collect(message: str, conn, session_id: str) -> str:
+    """Begin the guided call-reminder dialog from 'Rahul se 500 maango'."""
+    name = _parser._extract_party(message)
+    # A 10-digit phone must never be read as the rupee amount.
+    amount = _parser._extract_amount(re.sub(r"\d{10,}", " ", message))
+    if not name:
+        return "Kis se paise maangne hain? Naam bataiye — jaise ‘Rahul se 500 maango’."
+
+    row = db.find_party_by_name(conn, name)
+    if row is None:  # unknown customer — create the account so we can attach the reminder
+        pid = db.add_party(conn, name, "customer")
+        row = db.get_party(conn, pid)
+
+    r = {"name": row["name"], "amount": amount, "phone": row["phone"], "purpose": None}
+    if row["phone"]:
+        _SESSIONS[session_id] = {"awaiting": "reminder_purpose", "reminder": r}
+        return _ask_purpose(r)
+    _SESSIONS[session_id] = {"awaiting": "reminder_phone", "reminder": r}
+    return f"{row['name']} ka number kya hai? (ya ‘skip’ boliye)"
+
+
+def _handle_reminder_dialog(state: dict, message: str, conn, session_id: str) -> str:
+    """Advance the guided reminder dialog: number -> purpose -> time -> save."""
+    r = state["reminder"]
+    if message.strip().lower() in _CANCEL_PHRASES:
+        _SESSIONS.pop(session_id, None)
+        return "Theek hai, reminder cancel kar diya. 🙏"
+
+    if state["awaiting"] == "reminder_phone":
+        phone = tools.normalize_phone(message)
+        if phone:
+            tools.set_phone(conn, r["name"], message)
+            r["phone"] = phone
+            state["awaiting"] = "reminder_purpose"
+            return _ask_purpose(r)
+        tokens = re.sub(r"[^\w\s]", " ", message.lower()).split()
+        if any(t in _SKIP_WORDS for t in tokens):
+            state["awaiting"] = "reminder_purpose"
+            return _ask_purpose(r)
+        return f"Yeh number theek nahi laga 🤔. {r['name']} ka 10-digit mobile bataiye (ya ‘skip’)."
+
+    if state["awaiting"] == "reminder_purpose":
+        r["purpose"] = message.strip()
+        state["awaiting"] = "reminder_time"
+        return "Kis samay pe call karwana chahenge? (jaise ‘kal shaam 5 baje’)"
+
+    # reminder_time: parse the time, save the call reminder, finish.
+    due = _parser._extract_due(message.lower())
+    tools.schedule_reminder(conn, r["name"], due, message=r.get("purpose"),
+                            amount=r.get("amount"), channel="call")
+    _SESSIONS.pop(session_id, None)
+    when = _humanize_due(due)
+    return (f"Theek hai ✅, {r['name']} ko {when} par call kar diya jayega. "
+            f"Aapka jawab Reminders section me dikh jayega. Dhanyawaad 🙏")
 
 
 def _offline_respond(message: str, conn) -> str:
@@ -53,6 +345,13 @@ def _offline_respond(message: str, conn) -> str:
         if not rows:
             return "Abhi koi khaata nahi hai. Pehla likhne ke liye boliye 'Ramesh ko 500 udhaar'."
         return _fmt_list(rows)
+
+    if intent.action == "reminder":
+        if not intent.party:
+            return "Kis ke liye reminder lagaun? Naam bataiye — jaise 'Ramesh ko kal call karna'."
+        res = tools.schedule_reminder(conn, intent.party, intent.due_at,
+                                      message=intent.message, amount=intent.amount)
+        return _fmt_reminder(res)
 
     # Not a ledger intent: try a knowledge-base lookup (only if a KB is loaded).
     if rag.count(conn) > 0:
@@ -96,3 +395,25 @@ def _fmt_list(rows: list[dict]) -> str:
     for r in rows:
         lines.append(f"• {r['name']} ({r['type']}): ₹{r['balance']:.0f}")
     return "\n".join(lines)
+
+
+def _humanize_due(due_at: str) -> str:
+    try:
+        dt = datetime.fromisoformat(due_at)
+        return dt.strftime("%d %b, %H:%M")
+    except (TypeError, ValueError):
+        return due_at or "jaldi"
+
+
+def _fmt_reminder(res: dict) -> str:
+    """Warm confirmation for a call reminder. Never reads the WhatsApp URL aloud."""
+    p = res["party"]
+    when = _humanize_due(res.get("due_at"))
+    amt = res.get("amount")
+    amt_txt = f" ₹{amt:.0f} ke payment" if amt else ""
+    head = f"✅ {p} ko {when}{amt_txt} ke liye call reminder laga diya."
+    if res.get("whatsapp_link"):
+        head += " WhatsApp bhejne ka link Reminders page par hai 📲."
+    elif res.get("phone") is None:
+        head += f" ({p} ka phone number add karein WhatsApp ke liye.)"
+    return head

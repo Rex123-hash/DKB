@@ -35,10 +35,14 @@ with st.expander("➕ Naya reminder", expanded=not parties or True):
             col1, col2 = st.columns(2)
             d = col1.date_input("Date", value=dt.date.today() + dt.timedelta(days=1))
             t = col2.time_input("Time", value=dt.time(10, 0))
+            col3, col4 = st.columns(2)
+            amount = col3.number_input("Amount (₹, optional)", min_value=0.0, step=100.0)
+            channel = col4.radio("Channel", ["call", "whatsapp"], horizontal=True)
             msg = st.text_input("Message", value="Payment yaad dilao")
             if st.form_submit_button("Set reminder"):
                 due = dt.datetime.combine(d, t).isoformat(timespec="minutes")
-                res = ui.create_reminder(id_by_name[name], due, msg or None)
+                res = ui.create_reminder(id_by_name[name], due, msg or None,
+                                         amount=amount or None, channel=channel)
                 if res.status_code == 200:
                     st.success(f"⏰ {name} ke liye reminder set: {d} {t.strftime('%H:%M')}")
                     st.rerun()
@@ -61,9 +65,16 @@ for r in pending:
     except ValueError:
         overdue, when = False, r["due_at"]
     flag = "🔴 DUE" if overdue else "🟢"
-    c1, c2 = st.columns([5, 1])
-    c1.markdown(f"{flag}  **{r['party_name']}** — {r.get('message') or 'reminder'}  \n"
-                f"<small>{when}</small>", unsafe_allow_html=True)
-    if c2.button("Done", key=f"done_{r['id']}"):
+    amt = r.get("amount")
+    amt_txt = f" · ₹{amt:.0f}" if amt else ""
+    ch_txt = " · 📲 whatsapp" if r.get("channel") == "whatsapp" else " · 📞 call"
+    c1, c2, c3, c4 = st.columns([4, 1, 1, 1])
+    c1.markdown(f"{flag}  **{r['party_name']}**{amt_txt} — {r.get('message') or 'reminder'}  \n"
+                f"<small>{when}{ch_txt}</small>", unsafe_allow_html=True)
+    if r.get("call_link"):
+        c2.link_button("📞 Call", r["call_link"])
+    if r.get("whatsapp_link"):
+        c3.link_button("📲 WhatsApp", r["whatsapp_link"])
+    if c4.button("Done", key=f"done_{r['id']}"):
         ui.reminder_done(r["id"])
         st.rerun()

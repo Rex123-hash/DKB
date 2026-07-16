@@ -11,10 +11,15 @@ import base64
 from contextlib import asynccontextmanager
 from typing import Literal
 
-from fastapi import Depends, FastAPI, File, HTTPException, UploadFile
+import pathlib
+
+from fastapi import Depends, FastAPI, File, Form, HTTPException, UploadFile
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from app import brain, config, db, demo_data, rag, tools, voice  # noqa: F401  (config loads .env)
+
+WEB_DIR = pathlib.Path(__file__).resolve().parent.parent / "web"
 
 
 def get_conn():
@@ -47,6 +52,7 @@ app = FastAPI(title="Dukanbook AI Assistant", version="0.2.0", lifespan=lifespan
 class ChatRequest(BaseModel):
     message: str
     lang: str = "auto"
+    session_id: str = "default"
 
 
 class ChatResponse(BaseModel):
@@ -71,6 +77,8 @@ class ReminderIn(BaseModel):
     party_id: int
     due_at: str
     message: str | None = None
+    amount: float | None = None
+    channel: Literal["call", "whatsapp"] = "call"
 
 
 # ---- health ----
@@ -82,11 +90,14 @@ def health() -> dict:
 # ---- AI Assistant (separate module) ----
 @app.post("/chat", response_model=ChatResponse)
 def chat(req: ChatRequest) -> ChatResponse:
-    return ChatResponse(reply=brain.respond(req.message, req.lang), llm=config.has_llm())
+    return ChatResponse(
+        reply=brain.respond(req.message, req.lang, session_id=req.session_id),
+        llm=config.has_llm(),
+    )
 
 
 @app.post("/voice/chat")
-def voice_chat(file: UploadFile = File(...)) -> dict:
+def voice_chat(file: UploadFile = File(...), session_id: str = Form("default")) -> dict:
     """Audio in -> transcribe -> brain -> reply (+ TTS audio out).
 
     Sync route: FastAPI runs it in a worker thread, so the blocking Whisper call
@@ -96,7 +107,7 @@ def voice_chat(file: UploadFile = File(...)) -> dict:
         raise HTTPException(status_code=503, detail="voice libraries not installed")
     audio = file.file.read()
     stt = voice.transcribe(audio, file.filename or "audio.wav")
-    reply = brain.respond(stt["text"], stt["lang"])
+    reply = brain.respond(stt["text"], stt["lang"], session_id=session_id)
     audio_b64 = None
     try:
         out = voice.synthesize(reply, stt["lang"])
@@ -125,6 +136,21 @@ def create_party(p: PartyIn, conn=Depends(get_conn)) -> dict:
     return {"id": pid, "name": p.name, "type": p.type}
 
 
+class PhoneIn(BaseModel):
+    phone: str
+
+
+@app.post("/parties/{party_id}/phone")
+def set_party_phone(party_id: int, body: PhoneIn, conn=Depends(get_conn)) -> dict:
+    if db.get_party(conn, party_id) is None:
+        raise HTTPException(status_code=404, detail="party not found")
+    normalized = tools.normalize_phone(body.phone)
+    if normalized is None:
+        raise HTTPException(status_code=422, detail="invalid phone (need 10-digit Indian mobile)")
+    db.set_party_phone(conn, party_id, normalized)
+    return {"id": party_id, "phone": normalized}
+
+
 @app.post("/transactions")
 def add_transaction(t: TransactionIn, conn=Depends(get_conn)) -> dict:
     if db.get_party(conn, t.party_id) is None:
@@ -148,14 +174,25 @@ def admin_reset(conn=Depends(get_conn)) -> dict:
 # ---- Reminders module ----
 @app.get("/reminders")
 def list_reminders(status: str = "pending", conn=Depends(get_conn)) -> list[dict]:
-    return [dict(r) for r in db.list_reminders(conn, status)]
+    out = []
+    for r in db.list_reminders(conn, status):
+        row = dict(r)
+        row["whatsapp_link"] = tools.whatsapp_link(
+            row.get("phone"),
+            tools._reminder_text(row["party_name"], row.get("amount"), row.get("message")),
+        )
+        row["call_link"] = tools.call_link(row.get("phone"))
+        out.append(row)
+    return out
 
 
 @app.post("/reminders")
 def create_reminder(r: ReminderIn, conn=Depends(get_conn)) -> dict:
-    if db.get_party(conn, r.party_id) is None:
+    party = db.get_party(conn, r.party_id)
+    if party is None:
         raise HTTPException(status_code=404, detail="party not found")
-    rid = db.add_reminder(conn, r.party_id, r.due_at, r.message)
+    rid = db.add_reminder(conn, r.party_id, r.due_at, r.message, amount=r.amount,
+                          channel=r.channel, phone=party["phone"])
     return {"id": rid}
 
 
@@ -176,3 +213,8 @@ def party_detail(party_id: int, conn=Depends(get_conn)) -> dict:
         "balance": db.get_balance(conn, party_id),
         "transactions": txns,
     }
+
+
+# ---- Branded web app (HTML/CSS/JS replica of nestdukanbook.com), served same-origin ----
+if WEB_DIR.is_dir():
+    app.mount("/app", StaticFiles(directory=str(WEB_DIR), html=True), name="webapp")

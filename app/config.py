@@ -20,7 +20,11 @@ load_dotenv()  # reads .env from cwd / project root if it exists
 
 
 def has_llm() -> bool:
-    return bool(os.environ.get("GROQ_API_KEY"))
+    return bool(
+        os.environ.get("OLLAMA_MODEL")
+        or os.environ.get("GEMINI_API_KEY")
+        or os.environ.get("GROQ_API_KEY")
+    )
 
 
 @lru_cache(maxsize=1)

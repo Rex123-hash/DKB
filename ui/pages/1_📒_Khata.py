@@ -60,6 +60,26 @@ with tab_view:
         bal = detail["balance"]
         label = "Lene hain" if bal > 0 else ("Dene hain" if bal < 0 else "Clear")
         st.metric(f"{name} — {label}", f"₹{abs(bal):.0f}")
+
+        # --- phone: show + call + add/update ---
+        phone = detail["party"].get("phone")
+        if phone:
+            pc1, pc2 = st.columns([3, 1])
+            pc1.caption(f"📞 {phone}")
+            pc2.link_button("📞 Call", f"tel:+91{phone}")
+        else:
+            st.caption("📞 Phone number nahi hai")
+        with st.expander("✏️ Phone " + ("update" if phone else "add karein")):
+            with st.form(f"phone_form_{id_by_name[name]}", clear_on_submit=True):
+                new_phone = st.text_input("Phone (10-digit)", value=phone or "")
+                if st.form_submit_button("Save phone"):
+                    res = ui.set_party_phone(id_by_name[name], new_phone)
+                    if res.status_code == 200:
+                        st.success(f"✅ Phone save: {res.json()['phone']}")
+                        st.rerun()
+                    else:
+                        st.error("Number theek nahi laga — 10-digit mobile daaliye.")
+
         st.write("**History:**")
         if not detail["transactions"]:
             st.caption("Koi transaction nahi.")

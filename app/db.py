@@ -37,11 +37,16 @@ CREATE TABLE IF NOT EXISTS "transaction" (
 );
 
 CREATE TABLE IF NOT EXISTS reminder (
-    id        INTEGER PRIMARY KEY AUTOINCREMENT,
-    party_id  INTEGER NOT NULL REFERENCES party(id),
-    due_at    TEXT NOT NULL,
-    message   TEXT,
-    status    TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'done'))
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    party_id   INTEGER NOT NULL REFERENCES party(id),
+    due_at     TEXT NOT NULL,
+    message    TEXT,
+    status     TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'done')),
+    amount     REAL,
+    channel    TEXT NOT NULL DEFAULT 'call' CHECK (channel IN ('call', 'whatsapp')),
+    phone      TEXT,
+    created_by TEXT NOT NULL DEFAULT 'owner',
+    created_at TEXT
 );
 
 CREATE TABLE IF NOT EXISTS kb_chunk (
@@ -71,9 +76,30 @@ def get_connection(db_path: str | Path | None = None) -> sqlite3.Connection:
     return conn
 
 
+# Columns added to `reminder` after its original 5-column shape, so existing
+# databases can be upgraded in place. (col_name, ALTER definition).
+_REMINDER_MIGRATIONS = [
+    ("amount", "amount REAL"),
+    ("channel", "channel TEXT NOT NULL DEFAULT 'call'"),
+    ("phone", "phone TEXT"),
+    ("created_by", "created_by TEXT NOT NULL DEFAULT 'owner'"),
+    ("created_at", "created_at TEXT"),
+]
+
+
+def _migrate(conn: sqlite3.Connection) -> None:
+    """Idempotently add new reminder columns to a pre-existing database."""
+    have = {row["name"] for row in conn.execute("PRAGMA table_info(reminder)")}
+    for col, ddl in _REMINDER_MIGRATIONS:
+        if col not in have:
+            conn.execute(f"ALTER TABLE reminder ADD COLUMN {ddl}")
+    conn.commit()
+
+
 def init_db(conn: sqlite3.Connection) -> None:
-    """Create all tables if they do not exist."""
+    """Create all tables if they do not exist, then apply column migrations."""
     conn.executescript(SCHEMA)
+    _migrate(conn)
     conn.commit()
 
 
@@ -121,6 +147,12 @@ def get_or_create_party(
     return add_party(conn, name, type)
 
 
+def set_party_phone(conn: sqlite3.Connection, party_id: int, phone: str) -> None:
+    """Store/overwrite a party's phone number."""
+    conn.execute("UPDATE party SET phone = ? WHERE id = ?", (phone, party_id))
+    conn.commit()
+
+
 def list_parties(conn: sqlite3.Connection):
     return conn.execute("SELECT * FROM party ORDER BY name").fetchall()
 
@@ -137,11 +169,22 @@ def get_transactions(conn: sqlite3.Connection, party_id: int):
 
 
 def add_reminder(
-    conn: sqlite3.Connection, party_id: int, due_at: str, message: str | None = None
+    conn: sqlite3.Connection,
+    party_id: int,
+    due_at: str,
+    message: str | None = None,
+    amount: float | None = None,
+    channel: str = "call",
+    phone: str | None = None,
+    created_by: str = "owner",
 ) -> int:
+    if channel not in ("call", "whatsapp"):
+        raise ValueError(f"channel must be call|whatsapp, got {channel!r}")
     cur = conn.execute(
-        "INSERT INTO reminder (party_id, due_at, message, status) VALUES (?, ?, ?, 'pending')",
-        (party_id, due_at, message),
+        "INSERT INTO reminder "
+        "(party_id, due_at, message, status, amount, channel, phone, created_by, created_at) "
+        "VALUES (?, ?, ?, 'pending', ?, ?, ?, ?, ?)",
+        (party_id, due_at, message, amount, channel, phone, created_by, _now()),
     )
     conn.commit()
     return int(cur.lastrowid)
@@ -149,7 +192,8 @@ def add_reminder(
 
 def list_reminders(conn: sqlite3.Connection, status: str | None = None):
     sql = (
-        "SELECT r.id, r.party_id, r.due_at, r.message, r.status, p.name AS party_name "
+        "SELECT r.id, r.party_id, r.due_at, r.message, r.status, r.amount, r.channel, "
+        "r.phone, r.created_by, r.created_at, p.name AS party_name "
         "FROM reminder r JOIN party p ON p.id = r.party_id "
     )
     params: tuple = ()

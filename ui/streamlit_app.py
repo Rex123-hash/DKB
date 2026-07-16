@@ -10,7 +10,7 @@ import streamlit as st
 
 st.set_page_config(page_title="Dukanbook", page_icon="📒", layout="centered")
 ui.inject_theme()
-ui.header("📒 Dukanbook", "Aapka digital khata — Dashboard")
+ui.header("Dashboard", "Aapka digital khata")
 
 if ui.backend_down_banner():
     st.stop()
@@ -24,11 +24,11 @@ payable = sum(-p["balance"] for p in parties if p["balance"] < 0)     # aapko de
 
 pending_reminders = ui.list_reminders("pending")
 
-c1, c2, c3, c4 = st.columns(4)
+ui.summary_pill(receivable, payable)
+
+c1, c2 = st.columns(2)
 c1.metric("Khaate", len(parties))
-c2.metric("Lene hain (₹)", f"{receivable:.0f}")
-c3.metric("Dene hain (₹)", f"{payable:.0f}")
-c4.metric("Reminders", len(pending_reminders))
+c2.metric("Reminders", len(pending_reminders))
 
 st.divider()
 st.subheader("Saare khaate")
@@ -38,8 +38,9 @@ else:
     for p in sorted(parties, key=lambda x: -x["balance"]):
         bal = p["balance"]
         cls = "credit" if bal > 0 else ("debit" if bal < 0 else "")
+        phone_txt = f" · 📞 {p['phone']}" if p.get("phone") else ""
         st.markdown(
-            f"**{p['name']}** · _{p['type']}_ — "
+            f"**{p['name']}** · _{p['type']}_{phone_txt} — "
             f"<span class='{cls}'>₹{bal:.0f}</span>",
             unsafe_allow_html=True,
         )

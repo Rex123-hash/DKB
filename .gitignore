@@ -1,9 +1,16 @@
 # Python
 __pycache__/
 *.pyc
+.pytest_cache/
 
 # Virtual environment
 .venv/
+
+# Node dependencies
+node_modules/
+
+# Unrelated reference material (not part of this project)
+Solution  challenge inspiration/
 
 # Local database
 dukanbook.db

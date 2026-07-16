@@ -1,0 +1,72 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+  <title>DukanBook</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link href="https://fonts.googleapis.com/css2?family=Poppins:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <div class="device">
+    <div class="app" id="app">
+
+      <!-- ============ TOP BAR ============ -->
+      <header class="appbar" id="appbar">
+        <div class="appbar-row">
+          <div class="brand">DukanBook</div>
+          <div class="appbar-icons">
+            <button class="icon-btn" id="navChat" title="AI Assistant">💬</button>
+            <button class="icon-btn bell" id="navReminders" title="Reminders">
+              🔔<span class="badge" id="remBadge">0</span>
+            </button>
+            <button class="icon-btn" id="navTxns" title="Transactions">🧾</button>
+          </div>
+        </div>
+        <nav class="tabs" id="tabs">
+          <button class="tab active" data-tab="customer">Customers</button>
+          <button class="tab" data-tab="supplier">Suppliers</button>
+        </nav>
+      </header>
+
+      <!-- ============ SCROLLABLE BODY ============ -->
+      <main class="body" id="view"><!-- rendered by app.js --></main>
+
+      <!-- ============ BOTTOM NAV (AI chatbot in the centre) ============ -->
+      <nav class="bottomnav">
+        <svg class="wave" viewBox="0 0 400 26" preserveAspectRatio="none">
+          <path d="M0,26 L0,10 Q70,10 100,10 Q150,10 175,2 Q200,-6 225,2 Q250,10 300,10 Q330,10 400,10 L400,26 Z"></path>
+        </svg>
+        <button class="bn-item" data-nav="home">
+          <span class="bn-ico">🏠</span><span class="bn-lbl">Home</span>
+        </button>
+        <button class="bn-item" data-nav="stock">
+          <span class="bn-ico">📦</span><span class="bn-lbl">Stock</span>
+        </button>
+        <button class="bn-ai" id="navAI" title="AI Assistant">
+          <span class="bn-ai-ico">🤖</span><span class="bn-ai-lbl">Assistant</span>
+        </button>
+        <button class="bn-item" data-nav="bills">
+          <span class="bn-ico">🧾</span><span class="bn-lbl">Bills</span>
+        </button>
+        <button class="bn-item" data-nav="menu">
+          <span class="bn-ico">☰</span><span class="bn-lbl">Menu</span>
+        </button>
+      </nav>
+
+    </div>
+  </div>
+
+  <!-- ============ MODAL ROOT ============ -->
+  <div class="modal-root hidden" id="modalRoot">
+    <div class="modal-backdrop" id="modalBackdrop"></div>
+    <div class="modal-card" id="modalCard"><!-- filled by app.js --></div>
+  </div>
+
+  <!-- ============ TOAST ============ -->
+  <div class="toast hidden" id="toast"></div>
+
+  <script src="app.js"></script>
+</body>
+</html>

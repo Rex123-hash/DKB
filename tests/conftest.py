@@ -11,5 +11,7 @@ import pytest
 @pytest.fixture(autouse=True)
 def _no_llm_by_default(monkeypatch):
     monkeypatch.delenv("GROQ_API_KEY", raising=False)
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    monkeypatch.delenv("OLLAMA_MODEL", raising=False)
     # Use the small, already-cached embed model in tests (avoid the 2.24GB e5 download).
     monkeypatch.setenv("EMBED_MODEL", "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2")

@@ -7,7 +7,62 @@ ledger behaviour is identical whether or not an LLM key is present.
 """
 from __future__ import annotations
 
+import re
+from urllib.parse import quote
+
 from app import db, rag
+
+
+def normalize_phone(raw: str) -> str | None:
+    """Return a 10-digit Indian mobile number, or None if not valid.
+
+    Accepts common forms: spaces/dashes, a leading +91 / 91 / 0. The final
+    number must be 10 digits starting 6-9 (Indian mobile series).
+    """
+    digits = re.sub(r"\D", "", raw or "")
+    if len(digits) == 12 and digits.startswith("91"):
+        digits = digits[2:]
+    elif len(digits) == 11 and digits.startswith("0"):
+        digits = digits[1:]
+    if len(digits) == 10 and digits[0] in "6789":
+        return digits
+    return None
+
+
+def create_accounts(conn, names: list[str], party_type: str = "customer") -> dict:
+    """Create accounts for each name, skipping names that already exist.
+
+    Returns {'created': [{'id','name'}...], 'existing': [name...]}.
+    Names are matched case-insensitively so the same person is never duplicated.
+    """
+    created: list[dict] = []
+    existing: list[str] = []
+    for raw in names:
+        name = (raw or "").strip()
+        if not name:
+            continue
+        if db.find_party_by_name(conn, name) is not None:
+            existing.append(name)
+            continue
+        pid = db.add_party(conn, name, party_type)
+        created.append({"id": pid, "name": name})
+    return {"created": created, "existing": existing}
+
+
+def set_phone(conn, party_name: str, phone: str) -> dict:
+    """Validate and store a phone for an existing party.
+
+    Returns {'party','phone'} on success, or {'error': ...} if the number is
+    invalid or the party does not exist.
+    """
+    row = db.find_party_by_name(conn, party_name)
+    if row is None:
+        return {"error": "not_found", "party": party_name}
+    normalized = normalize_phone(phone)
+    if normalized is None:
+        return {"error": "invalid_phone", "party": party_name}
+    db.set_party_phone(conn, int(row["id"]), normalized)
+    return {"party": row["name"], "phone": normalized}
 
 
 def search_knowledge(conn, query: str, k: int = 5) -> list[dict]:
@@ -51,11 +106,62 @@ def get_party_balance(conn, party_name: str) -> dict | None:
     return {"party": row["name"], "balance": db.get_balance(conn, int(row["id"]))}
 
 
-def schedule_reminder(conn, party_name: str, due_at: str, message: str | None = None) -> dict:
-    """Create a payment/call reminder for a party at an ISO 8601 due_at."""
+def whatsapp_link(phone: str | None, text: str | None = None) -> str | None:
+    """Build a no-key wa.me click-to-send link, or None if the phone is unusable."""
+    digits = normalize_phone(phone or "")
+    if digits is None:
+        return None
+    base = f"https://wa.me/91{digits}"
+    return f"{base}?text={quote(text)}" if text else base
+
+
+def call_link(phone: str | None) -> str | None:
+    """Build a no-key click-to-dial tel: link, or None if the phone is unusable."""
+    digits = normalize_phone(phone or "")
+    return f"tel:+91{digits}" if digits else None
+
+
+def _reminder_text(party_name: str, amount: float | None, message: str | None) -> str:
+    """Default Hinglish WhatsApp follow-up text the shopkeeper can send."""
+    parts = [f"Namaste {party_name} ji 🙏,"]
+    if amount:
+        parts.append(f"aapka ₹{amount:.0f} ka payment pending hai.")
+    elif message:
+        parts.append(message)
+    else:
+        parts.append("ek chhoti si yaad-dilani thi.")
+    parts.append("Kripya jaldi clear karein. Dhanyavaad 🙏")
+    return " ".join(parts)
+
+
+def schedule_reminder(
+    conn,
+    party_name: str,
+    due_at: str,
+    message: str | None = None,
+    amount: float | None = None,
+    channel: str = "call",
+) -> dict:
+    """Create a payment/call reminder (call request) for a party at an ISO due_at.
+
+    Snapshots the party's phone onto the request and builds a no-key WhatsApp link.
+    """
     pid = db.get_or_create_party(conn, party_name)
-    rid = db.add_reminder(conn, pid, due_at, message)
-    return {"id": rid, "party": party_name, "due_at": due_at, "message": message}
+    row = db.get_party(conn, pid)
+    phone = row["phone"] if row else None
+    rid = db.add_reminder(conn, pid, due_at, message, amount=amount,
+                          channel=channel, phone=phone)
+    return {
+        "id": rid,
+        "party": party_name,
+        "due_at": due_at,
+        "message": message,
+        "amount": amount,
+        "channel": channel,
+        "phone": phone,
+        "whatsapp_link": whatsapp_link(phone, _reminder_text(party_name, amount, message)),
+        "call_link": call_link(phone),
+    }
 
 
 def list_reminders(conn, status: str = "pending") -> list[dict]:
@@ -70,6 +176,7 @@ def list_all_parties(conn) -> list[dict]:
                 "id": int(r["id"]),
                 "name": r["name"],
                 "type": r["type"],
+                "phone": r["phone"],
                 "balance": db.get_balance(conn, int(r["id"])),
             }
         )
