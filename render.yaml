@@ -12,9 +12,12 @@ services:
       - key: GROQ_API_KEY
         sync: false
 
-      # No Ollama in the container, so skip the localhost fallback provider.
+      # Second Ollama model, tried before any cloud provider. Leave empty when
+      # no Ollama is reachable; set it alongside OLLAMA_URL below so a
+      # quota-limited primary (e.g. a hosted :cloud model) hands off to a model
+      # on the same machine rather than jumping straight to Gemini.
       - key: OLLAMA_FALLBACK_MODEL
-        value: ""
+        sync: false
 
       # --- Optional: drive the deployed app from a self-hosted Ollama ---
       # Leave both empty and the app uses Gemini/Groq as normal. Set them to
