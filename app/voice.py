@@ -16,6 +16,7 @@ import asyncio
 import importlib.util
 import io
 import os
+import re
 import tempfile
 
 WHISPER_MODEL = os.environ.get("WHISPER_MODEL", "small")  # tiny|base|small|medium
@@ -120,11 +121,36 @@ async def _edge_synth(text: str, voice: str) -> bytes:
     return bytes(buf)
 
 
+# Emoji and other pictographs get read out by name ("folded hands", "robot
+# face"), which sounds wrong mid-sentence. Strip them from what is spoken; the
+# reply shown on screen keeps them.
+_EMOJI_RE = re.compile(
+    "["
+    "\U0001f300-\U0001faff"  # symbols, pictographs, emoticons, extended-A
+    "\U0001f000-\U0001f2ff"  # tiles, enclosed characters
+    "\U00002300-\U000023ff"  # misc technical: watches, hourglasses, ⏰ ⏳
+    "\U000025a0-\U000025ff"  # geometric shapes: ▶ ◼
+    "\U00002600-\U000027bf"  # misc symbols and dingbats
+    "\U00002b00-\U00002bff"  # arrows and misc symbols
+    "\U0001f1e6-\U0001f1ff"  # regional indicators (flags)
+    "\U0000fe00-\U0000fe0f"  # variation selectors
+    "\U00002190-\U000021ff"  # arrows
+    "\U0000200d"             # zero-width joiner, glues multi-part emoji
+    "]+"
+)
+
+
+def speakable(text: str) -> str:
+    """The part of a reply worth reading aloud: no emoji, no double spaces."""
+    return re.sub(r"\s{2,}", " ", _EMOJI_RE.sub("", text)).strip()
+
+
 def synthesize(text: str, lang: str = "hi") -> bytes:
     """Text -> MP3 audio bytes (empty if text blank). No API key.
 
     Called from a worker thread (sync route), so asyncio.run is safe here.
     """
-    if not text.strip():
+    text = speakable(text)
+    if not text:
         return b""
     return asyncio.run(_edge_synth(text, _voice_for(lang)))
