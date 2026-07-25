@@ -27,9 +27,11 @@ services:
         sync: false
       - key: OLLAMA_MODEL
         sync: false
-      # Short, so a hung tunnel fails over to the cloud instead of hanging.
+      # Long enough for a cold model to load from disk over the tunnel (~60s
+      # measured), short enough that a dead tunnel fails over to the cloud
+      # rather than hanging the reply. Warm calls return in a few seconds.
       - key: OLLAMA_TIMEOUT
-        value: "25"
+        value: "90"
 
       # A fresh container starts with an empty ledger; load the demo shop so the
       # live link has something to show.
