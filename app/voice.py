@@ -22,7 +22,12 @@ import tempfile
 WHISPER_MODEL = os.environ.get("WHISPER_MODEL", "small")  # tiny|base|small|medium
 
 GROQ_STT_URL = "https://api.groq.com/openai/v1/audio/transcriptions"
-GROQ_STT_MODEL = os.environ.get("GROQ_STT_MODEL", "whisper-large-v3-turbo")
+# large-v3 is noticeably more accurate than the turbo variant on Hindi and
+# code-mixed speech; the extra latency is worth it for short shop commands.
+GROQ_STT_MODEL = os.environ.get("GROQ_STT_MODEL", "whisper-large-v3")
+# Telling Whisper the language beats letting it auto-detect, which flips
+# between Hindi and English on Hinglish and garbles both.
+STT_LANGUAGE = os.environ.get("STT_LANGUAGE", "hi")
 
 # Neural edge-tts voices per language.
 _VOICES = {
@@ -60,6 +65,38 @@ def _norm_lang(lang: str | None) -> str:
     return _LANG_NAMES.get(lang, lang)
 
 
+# The words a shopkeeper actually uses, spelled the way we want them back.
+# Whisper conditions on this text, so it stops inventing spellings for common
+# ledger terms and hears Hinglish as Hinglish.
+LEDGER_VOCAB = (
+    "udhaar, jama, khaata, baaki, balance, payment, reminder, call karna, "
+    "phone number, credit, debit, rupaye, sau, hazaar, lakh, "
+    "customer, supplier, saman, stock, bill, GST"
+)
+
+
+def build_hint(names: list[str] | None = None) -> str:
+    """Vocabulary hint for the recogniser.
+
+    Written as example Hinglish sentences using the shop's own party names,
+    because Whisper mirrors the script and phrasing of its prompt: given
+    Devanagari it answers in Devanagari, given Roman Hinglish it answers in
+    Roman Hinglish and spells the names the way the ledger stores them.
+    """
+    names = [n.strip() for n in (names or []) if n and n.strip()]
+    a = names[0] if names else "Ramesh"
+    b = names[1] if len(names) > 1 else "Suresh"
+    c = names[2] if len(names) > 2 else "Verma Traders"
+    examples = (
+        f"{a} ko paanch sau ka udhaar likho. "
+        f"{b} ne do hazaar jama kiye. "
+        f"{c} ka khaata banao aur payment ka reminder do. "
+        f"{a} ka balance kitna hai?"
+    )
+    roster = f" Names: {', '.join(names[:20])}." if names else ""
+    return f"{examples}{roster} Words: {LEDGER_VOCAB}."
+
+
 def _use_groq() -> bool:
     """Pick the speech-to-text backend.
 
@@ -78,15 +115,29 @@ def _use_groq() -> bool:
     return bool(os.environ.get("GROQ_API_KEY"))
 
 
-def _groq_transcribe(audio_bytes: bytes, filename: str) -> dict:
-    """Speech bytes -> {'text', 'lang'} via Groq's hosted Whisper."""
+def _groq_transcribe(audio_bytes: bytes, filename: str, hint: str = "") -> dict:
+    """Speech bytes -> {'text', 'lang'} via Groq's hosted Whisper.
+
+    `hint` biases the decoder towards words it should expect — the shop's own
+    party names and the ledger vocabulary — which is what stops "Ramesh" coming
+    back as "दमेश".
+    """
     import requests  # lazy
 
+    data = {
+        "model": GROQ_STT_MODEL,
+        "response_format": "verbose_json",
+        "temperature": "0",  # deterministic; no creative re-interpretation
+    }
+    if STT_LANGUAGE:
+        data["language"] = STT_LANGUAGE
+    if hint:
+        data["prompt"] = hint[:880]  # Whisper only conditions on ~224 tokens
     resp = requests.post(
         GROQ_STT_URL,
         headers={"Authorization": f"Bearer {os.environ['GROQ_API_KEY']}"},
         files={"file": (filename or "audio.wav", io.BytesIO(audio_bytes))},
-        data={"model": GROQ_STT_MODEL, "response_format": "verbose_json"},
+        data=data,
         timeout=60,
     )
     resp.raise_for_status()
@@ -97,17 +148,27 @@ def _groq_transcribe(audio_bytes: bytes, filename: str) -> dict:
     }
 
 
-def transcribe(audio_bytes: bytes, filename: str = "audio.wav") -> dict:
-    """Speech bytes -> {'text', 'lang'}."""
+def transcribe(audio_bytes: bytes, filename: str = "audio.wav", hint: str = "") -> dict:
+    """Speech bytes -> {'text', 'lang'}.
+
+    `hint` is expected vocabulary (party names, ledger words). Both backends use
+    it to bias decoding, which markedly improves names and Hinglish phrasing.
+    """
     if _use_groq():
-        return _groq_transcribe(audio_bytes, filename)
+        return _groq_transcribe(audio_bytes, filename, hint)
     with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
         f.write(audio_bytes)
         path = f.name
     try:
-        segments, info = _get_model().transcribe(path, vad_filter=True)
+        segments, info = _get_model().transcribe(
+            path,
+            vad_filter=True,
+            language=STT_LANGUAGE or None,
+            initial_prompt=hint or None,
+            temperature=0,
+        )
         text = "".join(seg.text for seg in segments).strip()
-        return {"text": text, "lang": getattr(info, "language", "unknown")}
+        return {"text": text, "lang": _norm_lang(getattr(info, "language", None))}
     finally:
         os.remove(path)
 

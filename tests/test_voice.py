@@ -28,7 +28,7 @@ def client(tmp_path, monkeypatch):
     main = importlib.import_module("app.main")
     monkeypatch.setattr(main.config, "has_voice", lambda: True)
     monkeypatch.setattr(main.voice, "transcribe",
-                        lambda audio, fn="a.wav": {"text": "Ramesh ko 500 udhaar likho", "lang": "hi"})
+                        lambda audio, fn="a.wav", hint="": {"text": "Ramesh ko 500 udhaar likho", "lang": "hi"})
     monkeypatch.setattr(main.voice, "synthesize", lambda text, lang="hi": b"MP3DATA")
     with TestClient(main.app) as c:
         yield c

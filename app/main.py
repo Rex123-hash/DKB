@@ -123,7 +123,16 @@ def voice_chat(file: UploadFile = File(...), session_id: str = Form("default")) 
     if not config.has_voice():
         raise HTTPException(status_code=503, detail="voice libraries not installed")
     audio = file.file.read()
-    stt = voice.transcribe(audio, file.filename or "audio.wav")
+    # Feed the recogniser this shop's own party names, so spoken names come
+    # back spelled the way they are stored instead of phonetically.
+    conn = db.get_connection()
+    try:
+        names = [r["name"] for r in db.list_parties(conn)]
+    except Exception:
+        names = []
+    finally:
+        conn.close()
+    stt = voice.transcribe(audio, file.filename or "audio.wav", voice.build_hint(names))
     reply = brain.respond(stt["text"], stt["lang"], session_id=session_id)
     audio_b64 = None
     try:
