@@ -242,16 +242,16 @@ def _dispatch(name: str, args: dict, conn, created_sink: list | None = None) -> 
 
 
 def _providers() -> list[tuple]:
-    """Ordered (url, model, headers, timeout) list to try. The first is the chosen
-    provider (by priority); a local fallback model is appended so a cloud outage or
-    quota error still gets an LLM answer instead of dropping to the offline parser.
-      1. Local Ollama  - when OLLAMA_MODEL is set (no key)
-      2. Gemini        - when GEMINI_API_KEY is set
-      3. Groq          - when GROQ_API_KEY is set
-    Every configured provider is chained, so if one is rate-limited or down the
-    next one answers instead of dropping to the offline parser.
-    Fallback: local OLLAMA_FALLBACK_MODEL (default qwen3:8b); set it empty in a
-    deployment where no Ollama is running.
+    """Ordered (url, model, headers, timeout) list to try, in preference order:
+      1. Ollama OLLAMA_MODEL        - the chosen model (no key)
+      2. Ollama OLLAMA_FALLBACK_MODEL - a second local model, e.g. when the
+         first is a quota-limited hosted Ollama model
+      3. Gemini                     - when GEMINI_API_KEY is set
+      4. Groq                       - when GROQ_API_KEY is set
+    Every configured provider is chained, so a rate-limited or failing one hands
+    off to the next instead of dropping to the offline parser. Ollama is kept
+    ahead of the cloud so a machine running it stays local. Set
+    OLLAMA_FALLBACK_MODEL empty in a deployment where no Ollama is running.
     """
     json_hdr = {"Content-Type": "application/json"}
     ollama_model = os.environ.get("OLLAMA_MODEL")
@@ -260,14 +260,17 @@ def _providers() -> list[tuple]:
     chain: list[tuple] = []
     if ollama_model:
         chain.append((OLLAMA_URL, ollama_model, dict(json_hdr), 180))
+        # Straight after the primary, before any cloud provider: if the chosen
+        # model is out of quota the other local model should answer, not Gemini.
+        if FALLBACK_MODEL and FALLBACK_MODEL != ollama_model:
+            chain.append((OLLAMA_URL, FALLBACK_MODEL, dict(json_hdr), 180))
     if gemini_key:
         chain.append((GEMINI_URL, os.environ.get("GEMINI_MODEL", DEFAULT_MODEL),
                       {"Authorization": f"Bearer {gemini_key}", **json_hdr}, 30))
     if groq_key:
         chain.append((GROQ_URL, os.environ.get("GROQ_MODEL", DEFAULT_GROQ_MODEL),
                       {"Authorization": f"Bearer {groq_key}", **json_hdr}, 30))
-    # Append the local fallback unless it is already the primary.
-    if FALLBACK_MODEL and not (chain and chain[0][1] == FALLBACK_MODEL):
+    if not chain and FALLBACK_MODEL:  # no primary and no keys: still try local
         chain.append((OLLAMA_URL, FALLBACK_MODEL, dict(json_hdr), 180))
     if not chain:  # nothing configured at all
         chain.append((OLLAMA_URL, DEFAULT_OLLAMA_MODEL, dict(json_hdr), 180))
