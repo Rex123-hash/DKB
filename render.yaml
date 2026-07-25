@@ -16,6 +16,21 @@ services:
       - key: OLLAMA_FALLBACK_MODEL
         value: ""
 
+      # --- Optional: drive the deployed app from a self-hosted Ollama ---
+      # Leave both empty and the app uses Gemini/Groq as normal. Set them to
+      # point at an Ollama exposed over a tunnel and it becomes the first
+      # provider, with the cloud still behind it if the tunnel is unreachable.
+      #   OLLAMA_URL   https://<your-tunnel>/v1/chat/completions
+      #   OLLAMA_MODEL qwen3:8b
+      # Requires the tunnel to stay up; anything unreachable falls through.
+      - key: OLLAMA_URL
+        sync: false
+      - key: OLLAMA_MODEL
+        sync: false
+      # Short, so a hung tunnel fails over to the cloud instead of hanging.
+      - key: OLLAMA_TIMEOUT
+        value: "25"
+
       # A fresh container starts with an empty ledger; load the demo shop so the
       # live link has something to show.
       - key: SEED_ON_START

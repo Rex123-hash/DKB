@@ -25,6 +25,10 @@ DEFAULT_GROQ_MODEL = "llama-3.3-70b-versatile"
 DEFAULT_OLLAMA_MODEL = "llama3"
 # Local model tried if the primary provider fails (e.g. cloud quota/outage).
 FALLBACK_MODEL = os.environ.get("OLLAMA_FALLBACK_MODEL", "qwen3:8b")
+# Generous by default because a local model may load from disk on first call.
+# Lower it when OLLAMA_URL points across a tunnel, so an unreachable or hung
+# tunnel fails over to the next provider quickly instead of stalling the reply.
+OLLAMA_TIMEOUT = float(os.environ.get("OLLAMA_TIMEOUT", "180"))
 
 SYSTEM_PROMPT = (
     "You are Dukanbook's munshi (book-keeper) for an Indian shopkeeper. "
@@ -259,11 +263,11 @@ def _providers() -> list[tuple]:
     groq_key = os.environ.get("GROQ_API_KEY")
     chain: list[tuple] = []
     if ollama_model:
-        chain.append((OLLAMA_URL, ollama_model, dict(json_hdr), 180))
+        chain.append((OLLAMA_URL, ollama_model, dict(json_hdr), OLLAMA_TIMEOUT))
         # Straight after the primary, before any cloud provider: if the chosen
         # model is out of quota the other local model should answer, not Gemini.
         if FALLBACK_MODEL and FALLBACK_MODEL != ollama_model:
-            chain.append((OLLAMA_URL, FALLBACK_MODEL, dict(json_hdr), 180))
+            chain.append((OLLAMA_URL, FALLBACK_MODEL, dict(json_hdr), OLLAMA_TIMEOUT))
     if gemini_key:
         chain.append((GEMINI_URL, os.environ.get("GEMINI_MODEL", DEFAULT_MODEL),
                       {"Authorization": f"Bearer {gemini_key}", **json_hdr}, 30))
@@ -271,9 +275,9 @@ def _providers() -> list[tuple]:
         chain.append((GROQ_URL, os.environ.get("GROQ_MODEL", DEFAULT_GROQ_MODEL),
                       {"Authorization": f"Bearer {groq_key}", **json_hdr}, 30))
     if not chain and FALLBACK_MODEL:  # no primary and no keys: still try local
-        chain.append((OLLAMA_URL, FALLBACK_MODEL, dict(json_hdr), 180))
+        chain.append((OLLAMA_URL, FALLBACK_MODEL, dict(json_hdr), OLLAMA_TIMEOUT))
     if not chain:  # nothing configured at all
-        chain.append((OLLAMA_URL, DEFAULT_OLLAMA_MODEL, dict(json_hdr), 180))
+        chain.append((OLLAMA_URL, DEFAULT_OLLAMA_MODEL, dict(json_hdr), OLLAMA_TIMEOUT))
     return chain
 
 
