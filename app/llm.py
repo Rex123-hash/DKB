@@ -248,7 +248,10 @@ def _providers() -> list[tuple]:
       1. Local Ollama  - when OLLAMA_MODEL is set (no key)
       2. Gemini        - when GEMINI_API_KEY is set
       3. Groq          - when GROQ_API_KEY is set
-    Fallback: local OLLAMA_FALLBACK_MODEL (default qwen3:8b).
+    Every configured provider is chained, so if one is rate-limited or down the
+    next one answers instead of dropping to the offline parser.
+    Fallback: local OLLAMA_FALLBACK_MODEL (default qwen3:8b); set it empty in a
+    deployment where no Ollama is running.
     """
     json_hdr = {"Content-Type": "application/json"}
     ollama_model = os.environ.get("OLLAMA_MODEL")
@@ -257,10 +260,10 @@ def _providers() -> list[tuple]:
     chain: list[tuple] = []
     if ollama_model:
         chain.append((OLLAMA_URL, ollama_model, dict(json_hdr), 180))
-    elif gemini_key:
+    if gemini_key:
         chain.append((GEMINI_URL, os.environ.get("GEMINI_MODEL", DEFAULT_MODEL),
                       {"Authorization": f"Bearer {gemini_key}", **json_hdr}, 30))
-    elif groq_key:
+    if groq_key:
         chain.append((GROQ_URL, os.environ.get("GROQ_MODEL", DEFAULT_GROQ_MODEL),
                       {"Authorization": f"Bearer {groq_key}", **json_hdr}, 30))
     # Append the local fallback unless it is already the primary.

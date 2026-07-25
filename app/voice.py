@@ -1,18 +1,26 @@
-"""Voice I/O using local Python libraries — NO API keys.
+"""Voice I/O.
 
-  * STT: faster-whisper (offline Whisper). Handles Hindi / English / Hinglish.
+  * STT: Groq's hosted Whisper when GROQ_API_KEY is set, else faster-whisper
+    (offline). Either way it handles Hindi / English / Hinglish.
   * TTS: edge-tts (no key, neural Indian voices; needs internet but no signup).
 
-Both heavy imports are lazy so the rest of the app starts fast and tests can
+The hosted path exists because faster-whisper ships large native wheels and
+downloads a model at runtime, which does not fit a small deployment container.
+
+Heavy imports are lazy so the rest of the app starts fast and tests can
 monkeypatch `transcribe` / `synthesize` without the libraries loaded.
 """
 from __future__ import annotations
 
 import asyncio
+import io
 import os
 import tempfile
 
 WHISPER_MODEL = os.environ.get("WHISPER_MODEL", "small")  # tiny|base|small|medium
+
+GROQ_STT_URL = "https://api.groq.com/openai/v1/audio/transcriptions"
+GROQ_STT_MODEL = os.environ.get("GROQ_STT_MODEL", "whisper-large-v3-turbo")
 
 # Neural edge-tts voices per language.
 _VOICES = {
@@ -38,8 +46,48 @@ def _voice_for(lang: str | None) -> str:
     return _VOICES.get(lang.split("-")[0].lower(), _DEFAULT_VOICE)
 
 
+# Hosted Whisper reports a language name ("hindi"); faster-whisper reports an
+# ISO code ("hi"). Normalise so both paths feed `_voice_for` the same thing.
+_LANG_NAMES = {"hindi": "hi", "english": "en", "urdu": "hi", "nepali": "hi"}
+
+
+def _norm_lang(lang: str | None) -> str:
+    if not lang:
+        return "unknown"
+    lang = lang.strip().lower()
+    return _LANG_NAMES.get(lang, lang)
+
+
+def _use_groq() -> bool:
+    """Prefer hosted STT unless explicitly told to transcribe locally."""
+    if os.environ.get("STT_BACKEND") == "local":
+        return False
+    return bool(os.environ.get("GROQ_API_KEY"))
+
+
+def _groq_transcribe(audio_bytes: bytes, filename: str) -> dict:
+    """Speech bytes -> {'text', 'lang'} via Groq's hosted Whisper."""
+    import requests  # lazy
+
+    resp = requests.post(
+        GROQ_STT_URL,
+        headers={"Authorization": f"Bearer {os.environ['GROQ_API_KEY']}"},
+        files={"file": (filename or "audio.wav", io.BytesIO(audio_bytes))},
+        data={"model": GROQ_STT_MODEL, "response_format": "verbose_json"},
+        timeout=60,
+    )
+    resp.raise_for_status()
+    data = resp.json()
+    return {
+        "text": (data.get("text") or "").strip(),
+        "lang": _norm_lang(data.get("language")),
+    }
+
+
 def transcribe(audio_bytes: bytes, filename: str = "audio.wav") -> dict:
-    """Speech bytes -> {'text', 'lang'} fully offline."""
+    """Speech bytes -> {'text', 'lang'}."""
+    if _use_groq():
+        return _groq_transcribe(audio_bytes, filename)
     with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
         f.write(audio_bytes)
         path = f.name

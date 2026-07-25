@@ -1,0 +1,20 @@
+.venv/
+node_modules/
+__pycache__/
+**/__pycache__/
+*.pyc
+.pytest_cache/
+.git/
+.github/
+tests/
+ui/
+docs/
+Solution  challenge inspiration/
+*.pptx
+*.pdf
+*.db
+.env
+.streamlit/
+make_ppt.js
+build_techguide.py
+package*.json

@@ -8,12 +8,14 @@ Both read/write the SAME SQLite DB, so data stays consistent across modules.
 from __future__ import annotations
 
 import base64
+import os
 from contextlib import asynccontextmanager
 from typing import Literal
 
 import pathlib
 
 from fastapi import Depends, FastAPI, File, Form, HTTPException, UploadFile
+from fastapi.responses import RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
@@ -34,13 +36,28 @@ def get_conn():
 async def lifespan(app: FastAPI):
     conn = db.get_connection()
     db.init_db(conn)
-    # Build the knowledge base once (first run downloads the embed model).
+    # Load the knowledge base once. Prefer the prebuilt vector cache so a fresh
+    # deployment starts instantly and spends no embedding quota; fall back to
+    # embedding from source when there is no cache (first local run).
     try:
         if rag.count(conn) == 0:
-            n = rag.ingest(conn)
-            print(f"[rag] ingested {n} knowledge chunks")
+            n = rag.load_kb(conn)
+            if n:
+                print(f"[rag] loaded {n} knowledge chunks from cache")
+            else:
+                n = rag.ingest(conn)
+                print(f"[rag] ingested {n} knowledge chunks")
     except Exception as e:  # never block startup on RAG
-        print(f"[rag] ingest skipped: {e}")
+        print(f"[rag] knowledge base unavailable: {e}")
+    # On a fresh deployment the ledger is empty, which makes the live demo look
+    # broken. Seed once when asked, and only while there is nothing to lose.
+    if os.environ.get("SEED_ON_START") == "1":
+        try:
+            if not db.list_parties(conn):
+                demo_data.seed(conn)
+                print("[seed] loaded demo shop data")
+        except Exception as e:
+            print(f"[seed] skipped: {e}")
     conn.close()
     yield
 
@@ -217,4 +234,9 @@ def party_detail(party_id: int, conn=Depends(get_conn)) -> dict:
 
 # ---- Branded web app (HTML/CSS/JS replica of nestdukanbook.com), served same-origin ----
 if WEB_DIR.is_dir():
+    # The deployed root should open the shop app, not the bare API.
+    @app.get("/", include_in_schema=False)
+    def _root() -> RedirectResponse:
+        return RedirectResponse(url="/app/")
+
     app.mount("/app", StaticFiles(directory=str(WEB_DIR), html=True), name="webapp")

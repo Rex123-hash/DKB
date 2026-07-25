@@ -11,11 +11,17 @@ A positive balance means the party still owes the shopkeeper.
 """
 from __future__ import annotations
 
+import os
 import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
 
-DEFAULT_DB_PATH = Path(__file__).resolve().parent.parent / "dukanbook.db"
+# In production (e.g. Render) point DUKANBOOK_DB at a persistent disk mount such
+# as /data/dukanbook.db, so the ledger survives restarts and redeploys.
+DEFAULT_DB_PATH = Path(
+    os.environ.get("DUKANBOOK_DB")
+    or Path(__file__).resolve().parent.parent / "dukanbook.db"
+)
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS party (
@@ -70,6 +76,9 @@ def get_connection(db_path: str | Path | None = None) -> sqlite3.Connection:
     """
     if db_path is None:
         db_path = DEFAULT_DB_PATH
+    parent = Path(db_path).parent
+    if str(parent) and not parent.exists():
+        parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(str(db_path))
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")

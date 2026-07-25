@@ -85,6 +85,39 @@ This starts the backend and the screens together. The branded web app is availab
 turn on the smart assistant, run Ollama and set `OLLAMA_MODEL` in a `.env` file (a sample is
 in `.env.example`); a cloud key (`GEMINI_API_KEY` or `GROQ_API_KEY`) also works.
 
+## Deploying it
+
+The app ships as a container (`Dockerfile`), with `render.yaml` describing a Render
+web service. It runs the FastAPI backend and serves the branded web app, so the deployed
+root URL opens the shop app directly.
+
+A container cannot carry the offline models — the embedding model alone is about 2.2 GB —
+so the deployed build swaps them for hosted equivalents and drops Streamlit:
+
+- **Knowledge (RAG):** query embeddings come from the Gemini API. The passage vectors are
+  prebuilt into `data/kb_vectors.npz` and loaded at startup, so a fresh container makes no
+  embedding calls and starts instantly. Rebuild them with `python -m app.rag build` after
+  editing anything in `data/knowledge`.
+- **Speech to text:** Groq's hosted Whisper instead of faster-whisper.
+- **Text to speech:** still edge-tts, which needs no key.
+
+Set `GEMINI_API_KEY` and `GROQ_API_KEY` in the host's environment. Both are used: Gemini
+answers first and Groq takes over if it is rate-limited.
+
+To deploy on Render: push the repo, create a Blueprint from `render.yaml`, and add the two
+keys as environment variables. Note that the free plan has no persistent disk, so the
+SQLite file resets whenever the service restarts; `SEED_ON_START=1` means it comes back
+with the demo shop rather than empty. For real persistence, use a paid instance with a
+disk mounted at `/data` and set `DUKANBOOK_DB=/data/dukanbook.db` (both are commented into
+`render.yaml`).
+
+To run the container locally:
+
+```
+docker build -t dukanbook .
+docker run -p 8000:8000 -e GEMINI_API_KEY=... -e GROQ_API_KEY=... dukanbook
+```
+
 ## Documentation
 
 - `DukanBook_Technical_Documentation.pdf` — the full technical reference (architecture, stack,

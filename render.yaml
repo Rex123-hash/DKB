@@ -1,0 +1,39 @@
+services:
+  - type: web
+    name: dukanbook
+    runtime: docker
+    plan: free
+    region: singapore
+    healthCheckPath: /health
+    envVars:
+      # --- Secrets: set these in the Render dashboard, never commit them ---
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: GROQ_API_KEY
+        sync: false
+
+      # No Ollama in the container, so skip the localhost fallback provider.
+      - key: OLLAMA_FALLBACK_MODEL
+        value: ""
+
+      # A fresh container starts with an empty ledger; load the demo shop so the
+      # live link has something to show.
+      - key: SEED_ON_START
+        value: "1"
+
+    # --- Persistence ---
+    # The free plan has no persistent disk: the SQLite file lives in the
+    # container and is wiped whenever the service restarts or redeploys (free
+    # services also sleep after ~15 min idle). SEED_ON_START above means it
+    # always comes back with the demo shop rather than empty.
+    #
+    # To keep real data, move to a paid instance and uncomment both blocks:
+    #
+    # plan: starter
+    # disk:
+    #   name: dukanbook-data
+    #   mountPath: /data
+    #   sizeGB: 1
+    # and add:
+    #   - key: DUKANBOOK_DB
+    #     value: /data/dukanbook.db

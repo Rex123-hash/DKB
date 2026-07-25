@@ -29,8 +29,13 @@ def has_llm() -> bool:
 
 @lru_cache(maxsize=1)
 def has_voice() -> bool:
-    """Voice is available if the local libraries are installed (no key needed)."""
-    return all(
-        importlib.util.find_spec(m) is not None
-        for m in ("faster_whisper", "edge_tts")
+    """Voice needs speech-to-text plus text-to-speech.
+
+    STT is either Groq's hosted Whisper (a key, no install) or local
+    faster-whisper. TTS is edge-tts, which needs no key.
+    """
+    has_tts = importlib.util.find_spec("edge_tts") is not None
+    has_stt = bool(os.environ.get("GROQ_API_KEY")) or (
+        importlib.util.find_spec("faster_whisper") is not None
     )
+    return has_tts and has_stt

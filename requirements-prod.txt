@@ -1,0 +1,17 @@
+# Deployment requirements (see requirements.txt for the full local dev set).
+#
+# Deliberately excluded, and why:
+#   streamlit       - the dev-only UI; the branded web app is what ships
+#   fastembed       - pulls a ~2.2 GB embedding model; production embeds via the
+#                     Gemini API instead (app/rag.py)
+#   faster-whisper  - large native wheels + runtime model download; production
+#                     transcribes via Groq's hosted Whisper (app/voice.py)
+#   pytest          - tests do not run in the container
+fastapi
+uvicorn[standard]
+requests
+httpx
+python-dotenv
+python-multipart
+numpy
+edge-tts
