@@ -91,6 +91,11 @@ The app ships as a container (`Dockerfile`), with `render.yaml` describing a Ren
 web service. It runs the FastAPI backend and serves the branded web app, so the deployed
 root URL opens the shop app directly.
 
+Running locally is unchanged: as long as Ollama and the offline libraries are installed, the
+app uses them and needs no key. Each backend picks itself — the local library wins whenever
+it is present, and the cloud is used only where it is absent, which is exactly the case
+inside the container. Nothing to switch by hand.
+
 A container cannot carry the offline models — the embedding model alone is about 2.2 GB —
 so the deployed build swaps them for hosted equivalents and drops Streamlit:
 

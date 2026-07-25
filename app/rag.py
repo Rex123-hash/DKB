@@ -11,6 +11,7 @@ downloading the model.
 from __future__ import annotations
 
 import glob
+import importlib.util
 import os
 import re
 import time
@@ -46,10 +47,29 @@ GEMINI_EMBED_DIM = int(os.environ.get("GEMINI_EMBED_DIM", "768"))
 
 
 def _use_gemini() -> bool:
-    """Prefer cloud embeddings unless explicitly told to embed locally."""
-    if os.environ.get("EMBED_BACKEND") == "local":
+    """Pick the embedding backend.
+
+    Local fastembed wins whenever it is installed, so a normal `python run.py`
+    keeps working entirely offline. The deployment container does not ship
+    fastembed (the model is ~2.2 GB), so it falls through to Gemini.
+    Force either way with EMBED_BACKEND=local|cloud.
+    """
+    forced = os.environ.get("EMBED_BACKEND")
+    if forced == "local":
+        return False
+    if forced == "cloud":
+        return True
+    if importlib.util.find_spec("fastembed") is not None:
         return False
     return bool(os.environ.get("GEMINI_API_KEY"))
+
+
+def _backend_id() -> str:
+    """Identifies which model produced a set of vectors, so a cached knowledge
+    base built by one backend is never searched with the other."""
+    if _use_gemini():
+        return f"gemini:{GEMINI_EMBED_MODEL}:{GEMINI_EMBED_DIM}"
+    return f"local:{os.environ.get('EMBED_MODEL', MODEL_NAME)}"
 
 
 def _gemini_embed(texts: list[str], kind: str) -> np.ndarray:
@@ -177,16 +197,26 @@ def export_kb(conn, path: str | Path = KB_CACHE) -> int:
         texts=np.array([r["text"] for r in rows], dtype=object),
         sources=np.array([r["source"] for r in rows], dtype=object),
         vectors=np.vstack([np.frombuffer(r["embedding"], dtype=np.float32) for r in rows]),
+        backend=np.array(_backend_id()),
     )
     return len(rows)
 
 
 def load_kb(conn, path: str | Path = KB_CACHE) -> int:
-    """Load the prebuilt cache into kb_chunk. Returns 0 if there is no cache."""
+    """Load the prebuilt cache into kb_chunk.
+
+    Returns 0 when there is no cache, or when the cache was built by a different
+    embedding backend than the one now active — the caller then re-ingests
+    locally rather than searching mismatched vectors.
+    """
     path = Path(path)
     if not path.exists():
         return 0
     data = np.load(path, allow_pickle=True)
+    cached = str(data["backend"]) if "backend" in data.files else "unknown"
+    if cached != _backend_id():
+        print(f"[rag] cache built by {cached}, active backend is {_backend_id()}; rebuilding")
+        return 0
     texts, sources, vectors = data["texts"], data["sources"], data["vectors"]
     conn.execute("DELETE FROM kb_chunk")
     for t, s, v in zip(texts, sources, vectors):

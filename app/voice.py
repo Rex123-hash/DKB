@@ -13,6 +13,7 @@ monkeypatch `transcribe` / `synthesize` without the libraries loaded.
 from __future__ import annotations
 
 import asyncio
+import importlib.util
 import io
 import os
 import tempfile
@@ -59,8 +60,19 @@ def _norm_lang(lang: str | None) -> str:
 
 
 def _use_groq() -> bool:
-    """Prefer hosted STT unless explicitly told to transcribe locally."""
-    if os.environ.get("STT_BACKEND") == "local":
+    """Pick the speech-to-text backend.
+
+    Local faster-whisper wins whenever it is installed, so a normal
+    `python run.py` transcribes offline as before. The deployment container does
+    not ship it (large native wheels + a runtime model download), so it falls
+    through to Groq. Force either way with STT_BACKEND=local|cloud.
+    """
+    forced = os.environ.get("STT_BACKEND")
+    if forced == "local":
+        return False
+    if forced == "cloud":
+        return True
+    if importlib.util.find_spec("faster_whisper") is not None:
         return False
     return bool(os.environ.get("GROQ_API_KEY"))
 
