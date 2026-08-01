@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from datetime import datetime, time, timedelta
+from datetime import date, datetime, time, timedelta
 
 # Word lists (lowercased). Order of checks matters; see parse().
 BALANCE_WORDS = ["baaki", "baki", "balance", "kitna dena", "kitna lena",
@@ -31,6 +31,13 @@ REMINDER_WORDS = ["yaad dila", "yaad dilana", "reminder", "remind", "call karna"
                   "call karo", "call kar do", "call lagana", "call laga", "call karke",
                   "follow up", "followup", "follow-up", "call back"]
 _WEEKDAYS = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"]
+_MONTHS = {
+    "jan": 1, "january": 1, "feb": 2, "february": 2, "mar": 3, "march": 3,
+    "apr": 4, "april": 4, "may": 5, "jun": 6, "june": 6, "jul": 7,
+    "july": 7, "aug": 8, "august": 8, "sep": 9, "september": 9,
+    "oct": 10, "october": 10, "nov": 11, "november": 11, "dec": 12,
+    "december": 12,
+}
 # Words to drop when pulling names out of a create command.
 _NAME_NOISE = set(ACCOUNT_WORDS + MAKE_WORDS + SUPPLIER_WORDS
                   + ["aur", "and", "&", "do", "de", "ka", "ke", "ki", "for"])
@@ -64,6 +71,8 @@ class Intent:
     party_type: str = "customer"         # 'customer' | 'supplier'
     phone: str | None = None             # raw inline phone digits, if given
     due_at: str | None = None            # for 'reminder' (ISO 8601)
+    reminder_date_provided: bool = False
+    reminder_time_provided: bool = False
     message: str | None = None           # description (e.g. the reminder text)
 
 
@@ -160,52 +169,87 @@ def _extract_phone(text: str) -> str | None:
     return re.sub(r"\D", "", match.group(1)) if match else None
 
 
-def _extract_due(text: str, now: datetime | None = None) -> str:
-    """Best-effort relative date+time from Hinglish/English. Defaults to 10:00."""
+def _extract_date_part(text: str, now: datetime | None = None) -> date | None:
+    """Return an explicitly spoken reminder date, or None when it was omitted."""
     now = now or datetime.now()
-    d = now.date()
     if "parso" in text or "परसों" in text or "परसो" in text:
-        d = d + timedelta(days=2)
-    elif "kal" in text or "tomorrow" in text or "कल" in text:
-        d = d + timedelta(days=1)
-    elif "aaj" in text or "today" in text or "आज" in text:
-        pass
-    else:
-        for i, wd in enumerate(_WEEKDAYS):
-            if wd in text:
-                ahead = (i - now.weekday()) % 7
-                d = d + timedelta(days=ahead or 7)  # next such weekday
-                break
+        return now.date() + timedelta(days=2)
+    if "kal" in text or "tomorrow" in text or "कल" in text:
+        return now.date() + timedelta(days=1)
+    if "aaj" in text or "today" in text or "आज" in text:
+        return now.date()
+    iso = re.search(r"(?<!\d)(\d{4})-(\d{1,2})-(\d{1,2})(?!\d)", text)
+    if iso:
+        try:
+            return date(int(iso.group(1)), int(iso.group(2)), int(iso.group(3)))
+        except ValueError:
+            return None
+    numeric = re.search(r"(?<!\d)(\d{1,2})[/-](\d{1,2})(?:[/-](\d{2,4}))?(?!\d)", text)
+    if numeric:
+        year = int(numeric.group(3) or now.year)
+        year = year + 2000 if year < 100 else year
+        try:
+            return date(year, int(numeric.group(2)), int(numeric.group(1)))
+        except ValueError:
+            return None
+    named = re.search(
+        r"(?<!\d)(\d{1,2})\s+(" + "|".join(_MONTHS) + r")(?:\s+(\d{4}))?",
+        text,
+    )
+    if named:
+        try:
+            return date(int(named.group(3) or now.year), _MONTHS[named.group(2)], int(named.group(1)))
+        except ValueError:
+            return None
+    for i, weekday in enumerate(_WEEKDAYS):
+        if weekday in text:
+            ahead = (i - now.weekday()) % 7
+            return now.date() + timedelta(days=ahead or 7)
+    return None
 
-    hour, minute = 10, 0
+
+def _extract_time_part(text: str) -> time | None:
+    """Return an explicitly spoken clock time, or None when it was omitted/invalid."""
     m = re.search(r"(\d{1,2})(?::(\d{2}))?\s*(am|pm)", text)
     if m:
-        h = int(m.group(1)) % 12 + (12 if m.group(3) == "pm" else 0)
+        raw_hour = int(m.group(1))
         mins = int(m.group(2) or 0)
-        if 0 <= h <= 23 and 0 <= mins <= 59:  # ignore garbage like "4:99 pm"
-            hour, minute = h, mins
+        if 1 <= raw_hour <= 12 and 0 <= mins <= 59:
+            hour = raw_hour % 12 + (12 if m.group(3) == "pm" else 0)
+            return time(hour, mins)
+        return None
+
+    clock = re.search(r"(?<!\d)(\d{1,2}):(\d{2})(?!\d)", text)
+    if clock:
+        hour, minute = int(clock.group(1)), int(clock.group(2))
+        return time(hour, minute) if 0 <= hour <= 23 and 0 <= minute <= 59 else None
+
+    hour: int | None = None
+    m = re.search(r"(\d{1,2})\s*(?:baje|बजे)", text)
+    if m:
+        candidate = int(m.group(1))
+        if 0 <= candidate <= 23:
+            hour = candidate
     else:
-        m = re.search(r"(\d{1,2})\s*(?:baje|बजे)", text)
-        if m:
-            h = int(m.group(1))
-            if 0 <= h <= 23:  # ignore "50 baje" (mis-transcription) -> keep 10:00
-                hour = h
-                # "shaam/raat/dopahar 5 baje" is PM; "subah 5 baje" stays AM.
-                if 1 <= h <= 11 and _has(text, ["shaam", "sham", "evening", "raat",
-                                                "night", "dopahar", "afternoon",
-                                                "शाम", "रात", "दोपहर"]):
-                    hour = h + 12
-        else:
-            # Voice transcription commonly emits "paanch baje" / "पांच बजे".
-            for word, value in _NUM_UNITS.items():
-                if value <= 12 and re.search(rf"(?<!\w){re.escape(word)}\s*(?:baje|बजे)", text):
-                    hour = value
-                    if value <= 11 and _has(text, ["shaam", "sham", "evening", "raat",
-                                                          "night", "dopahar", "afternoon",
-                                                          "शाम", "रात", "दोपहर"]):
-                        hour += 12
-                    break
-    return datetime.combine(d, time(hour, minute)).isoformat(timespec="minutes")
+        # Voice transcription commonly emits "paanch baje" / "पांच बजे".
+        for word, value in _NUM_UNITS.items():
+            if value <= 12 and re.search(rf"(?<!\w){re.escape(word)}\s*(?:baje|बजे)", text):
+                hour = value
+                break
+    if hour is None:
+        return None
+    if 1 <= hour <= 11 and _has(text, ["shaam", "sham", "evening", "raat", "night",
+                                          "dopahar", "afternoon", "शाम", "रात", "दोपहर"]):
+        hour += 12
+    return time(hour, 0)
+
+
+def _extract_due(text: str, now: datetime | None = None) -> str:
+    """Best-effort date-time; legacy callers receive today/10:00 defaults."""
+    now = now or datetime.now()
+    due_date = _extract_date_part(text, now) or now.date()
+    due_time = _extract_time_part(text) or time(10, 0)
+    return datetime.combine(due_date, due_time).isoformat(timespec="minutes")
 
 
 def parse(message: str) -> Intent:
@@ -218,12 +262,16 @@ def parse(message: str) -> Intent:
         # money amount ("10 baje" != ₹10; a 10-digit phone != a rupee amount).
         cleaned = re.sub(r"\d{1,2}(?::\d{2})?\s*(?:baje|am|pm|o'?clock)", " ", text)
         cleaned = re.sub(r"\d{10,}", " ", cleaned)
+        explicit_date = _extract_date_part(text)
+        explicit_time = _extract_time_part(text)
         return Intent(
             "reminder",
             party=_extract_party(message),
             amount=_extract_amount(cleaned),
             phone=_extract_phone(text),
             due_at=_extract_due(text),
+            reminder_date_provided=explicit_date is not None,
+            reminder_time_provided=explicit_time is not None,
             message=message,
         )
 

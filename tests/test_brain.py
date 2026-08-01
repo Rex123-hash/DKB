@@ -135,7 +135,7 @@ def test_offline_reminder_creates_row_without_reading_url(conn):
     from app import tools
     tools.create_accounts(conn, ["Rahul"])
     tools.set_phone(conn, "Rahul", "9876543210")
-    out = brain.respond("Rahul ko kal 5000 ke payment ke liye call karna", conn=conn)
+    out = brain.respond("Rahul ko kal 5 baje 5000 ke payment ke liye call karna", conn=conn)
     assert "call reminder laga diya" in out
     assert "http" not in out  # never read the WhatsApp URL aloud
     rows = db.list_reminders(conn)
@@ -149,7 +149,7 @@ def test_reminder_without_phone_waits_for_phone_or_skip(conn):
     tools.create_accounts(conn, ["Sita"])
     s = "ordinary-reminder"
 
-    first = brain.respond("Sita ko kal 500 ka payment reminder lagao", conn=conn, session_id=s)
+    first = brain.respond("Sita ko kal 5 baje 500 ka payment reminder lagao", conn=conn, session_id=s)
     assert "10-digit" in first and "skip" in first.lower()
     assert db.list_reminders(conn) == []
 
@@ -167,7 +167,7 @@ def test_reminder_without_phone_allows_explicit_skip(conn):
     tools.create_accounts(conn, ["Mohan"])
     s = "ordinary-reminder-skip"
 
-    brain.respond("Mohan ko kal 500 ke liye call karna", conn=conn, session_id=s)
+    brain.respond("Mohan ko kal 5 baje 500 ke liye call karna", conn=conn, session_id=s)
     not_skipped = brain.respond("number nahi hai", conn=conn, session_id=s)
     assert "skip" in not_skipped.lower()
     assert db.list_reminders(conn) == []
@@ -179,7 +179,7 @@ def test_reminder_without_phone_allows_explicit_skip(conn):
 
 def test_reminder_pronoun_asks_party_then_missing_amount(conn):
     s = "pronoun-reminder"
-    first = brain.respond("mujhe kal payment yaad dilana", conn=conn, session_id=s)
+    first = brain.respond("mujhe kal 5 baje payment yaad dilana", conn=conn, session_id=s)
     assert "kiske liye" in first.lower()
     assert db.find_party_by_name(conn, "mujhe") is None
 
@@ -196,10 +196,41 @@ def test_reminder_pronoun_asks_party_then_missing_amount(conn):
 
 def test_party_followup_can_include_amount_without_repeat_question(conn):
     s = "party-and-amount"
-    brain.respond("mujhe kal reminder lagao", conn=conn, session_id=s)
+    brain.respond("mujhe kal 5 baje reminder lagao", conn=conn, session_id=s)
     reply = brain.respond("Suresh ke liye 900", conn=conn, session_id=s)
     assert "10-digit" in reply
     assert "amount" not in reply.lower()
+
+
+def test_reminder_asks_missing_time_instead_of_defaulting_to_ten(conn):
+    from app import tools
+    tools.create_accounts(conn, ["Ram"])
+    tools.set_phone(conn, "Ram", "9876543210")
+    s = "missing-time"
+
+    first = brain.respond("Ram ko kal 500 ka reminder lagao", conn=conn, session_id=s)
+    assert "kis time" in first.lower()
+    assert "10:00" not in first
+    assert db.list_reminders(conn) == []
+
+    done = brain.respond("shaam 6 baje", conn=conn, session_id=s)
+    assert "reminder laga diya" in done
+    assert db.list_reminders(conn)[0]["due_at"].endswith("18:00")
+
+
+def test_reminder_asks_missing_date_and_preserves_given_time(conn):
+    from app import tools
+    tools.create_accounts(conn, ["Riya"])
+    tools.set_phone(conn, "Riya", "9876543210")
+    s = "missing-date"
+
+    first = brain.respond("Riya ko 6 PM 800 ka reminder lagao", conn=conn, session_id=s)
+    assert "kis date" in first.lower()
+    assert db.list_reminders(conn) == []
+
+    done = brain.respond("kal", conn=conn, session_id=s)
+    assert "reminder laga diya" in done
+    assert db.list_reminders(conn)[0]["due_at"].endswith("18:00")
 
 
 # --- guided "maango" call-reminder dialog (name -> [number] -> purpose -> time) ---

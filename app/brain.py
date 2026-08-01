@@ -86,7 +86,8 @@ _SKIP_WORDS = {"skip", "chhodo", "chhod", "chhoddo", "baad", "rehne", "nahi",
 _COLLECT_WORDS = ("maang", "मांग", "माँग", "paise lene", "payment maang")
 _REMINDER_STEPS = (
     "reminder_phone", "reminder_purpose", "reminder_time", "reminder_party_only",
-    "reminder_amount_only", "reminder_phone_only", "reminder_collect_amount"
+    "reminder_amount_only", "reminder_date_only", "reminder_time_only",
+    "reminder_phone_only", "reminder_collect_amount"
 )
 _CANCEL_PHRASES = {"cancel", "rehne do", "chhod do", "band karo", "ruko", "cancel karo"}
 
@@ -153,7 +154,10 @@ def respond(message: str, lang: str = "auto", conn=None, session_id: str = "defa
                 if created:
                     return _begin_phone_capture(created, session_id)
                 if pending_reminders:
-                    return _begin_reminder_details(pending_reminders[0], session_id)
+                    pending = pending_reminders[0]
+                    pending["date_provided"] = _parser._extract_date_part(message.lower()) is not None
+                    pending["time_provided"] = _parser._extract_time_part(message.lower()) is not None
+                    return _begin_reminder_details(pending, session_id)
                 return reply
             except Exception:
                 pass  # graceful fallback to the offline path
@@ -281,12 +285,14 @@ def _ask_purpose(r: dict) -> str:
 def _begin_reminder_details(reminder: dict, session_id: str) -> str:
     """Pause a reminder and ask for the first mandatory detail that is missing."""
     pending = {
-        "name": reminder.get("party"),
+        "name": reminder.get("party") or reminder.get("name"),
         "due_at": reminder.get("due_at"),
         "purpose": reminder.get("message"),
         "amount": reminder.get("amount"),
         "channel": reminder.get("channel", "call"),
         "provided_phone": reminder.get("provided_phone"),
+        "date_provided": bool(reminder.get("date_provided")),
+        "time_provided": bool(reminder.get("time_provided")),
     }
     if reminder.get("needs_party") or not tools.valid_party_name(pending["name"]):
         awaiting = "reminder_party_only"
@@ -294,6 +300,12 @@ def _begin_reminder_details(reminder: dict, session_id: str) -> str:
     elif reminder.get("needs_amount") or not pending.get("amount"):
         awaiting = "reminder_amount_only"
         question = f"{pending['name']} ke reminder ki amount kitni hai? Rupees mein bataiye."
+    elif reminder.get("needs_date") or not pending["date_provided"]:
+        awaiting = "reminder_date_only"
+        question = "Reminder kis date ko chahiye? Jaise ‘aaj’, ‘kal’ ya ‘5 August’."
+    elif reminder.get("needs_time") or not pending["time_provided"]:
+        awaiting = "reminder_time_only"
+        question = "Reminder kis time par chahiye? Jaise ‘shaam 5 baje’ ya ‘5 PM’."
     else:
         awaiting = "reminder_phone_only"
         question = (
@@ -305,6 +317,14 @@ def _begin_reminder_details(reminder: dict, session_id: str) -> str:
 
 
 def _continue_reminder(r: dict, conn, session_id: str, *, skip_phone: bool = False) -> str:
+    if not tools.valid_party_name(r.get("name")):
+        return _begin_reminder_details({**r, "party": None, "needs_party": True}, session_id)
+    if not r.get("amount") or r["amount"] <= 0:
+        return _begin_reminder_details({**r, "party": r.get("name"), "needs_amount": True}, session_id)
+    if not r.get("date_provided"):
+        return _begin_reminder_details({**r, "party": r.get("name"), "needs_date": True}, session_id)
+    if not r.get("time_provided"):
+        return _begin_reminder_details({**r, "party": r.get("name"), "needs_time": True}, session_id)
     result = tools.schedule_reminder(
         conn,
         r.get("name"),
@@ -327,6 +347,8 @@ def _continue_reminder(r: dict, conn, session_id: str, *, skip_phone: bool = Fal
         )
     if any(result.get(key) for key in ("needs_party", "needs_amount", "needs_phone")):
         result["provided_phone"] = r.get("provided_phone")
+        result["date_provided"] = r.get("date_provided")
+        result["time_provided"] = r.get("time_provided")
         return _begin_reminder_details(result, session_id)
     _SESSIONS.pop(session_id, None)
     return _fmt_reminder(result)
@@ -341,6 +363,8 @@ def _start_reminder(intent, conn, session_id: str) -> str:
         "amount": intent.amount,
         "channel": "call",
         "provided_phone": intent.phone,
+        "date_provided": intent.reminder_date_provided,
+        "time_provided": intent.reminder_time_provided,
     }
     if pending["party"] is None:
         pending["needs_party"] = True
@@ -349,8 +373,38 @@ def _start_reminder(intent, conn, session_id: str) -> str:
         "name": pending["party"], "due_at": pending["due_at"],
         "purpose": pending["message"], "amount": pending["amount"],
         "channel": pending["channel"], "provided_phone": pending["provided_phone"],
+        "date_provided": pending["date_provided"],
+        "time_provided": pending["time_provided"],
     }
     return _continue_reminder(internal, conn, session_id)
+
+
+def _update_reminder_due(r: dict, message: str, *, allow_bare_time: bool = False) -> tuple[bool, bool]:
+    """Merge explicitly supplied date/time parts into a pending reminder."""
+    text = message.strip().lower()
+    due_date = _parser._extract_date_part(text)
+    due_time = _parser._extract_time_part(text)
+    if due_time is None and allow_bare_time:
+        bare = re.sub(r"[^\w]", "", text)
+        if bare.isdigit() and 0 <= int(bare) <= 23:
+            due_time = datetime.min.replace(hour=int(bare)).time()
+        else:
+            for word, value in _parser._NUM_UNITS.items():
+                if bare == word and value <= 12:
+                    due_time = datetime.min.replace(hour=value).time()
+                    break
+    try:
+        current = datetime.fromisoformat(r.get("due_at") or "")
+    except ValueError:
+        current = datetime.now().replace(hour=10, minute=0, second=0, microsecond=0)
+    if due_date:
+        r["date_provided"] = True
+    if due_time:
+        r["time_provided"] = True
+    r["due_at"] = datetime.combine(
+        due_date or current.date(), due_time or current.time().replace(second=0, microsecond=0)
+    ).isoformat(timespec="minutes")
+    return due_date is not None, due_time is not None
 
 
 def _start_collect(message: str, conn, session_id: str) -> str:
@@ -396,6 +450,7 @@ def _handle_reminder_dialog(state: dict, message: str, conn, session_id: str) ->
         inline_amount = _parser._extract_amount(amount_text.lower())
         if inline_amount and inline_amount > 0:
             r["amount"] = inline_amount
+        _update_reminder_due(r, message)
         return _continue_reminder(r, conn, session_id)
 
     if state["awaiting"] == "reminder_amount_only":
@@ -406,6 +461,19 @@ def _handle_reminder_dialog(state: dict, message: str, conn, session_id: str) ->
         if amount is None or amount <= 0:
             return f"{r['name']} ke reminder ki positive amount rupees mein bataiye — jaise ‘500’."
         r["amount"] = amount
+        _update_reminder_due(r, message)
+        return _continue_reminder(r, conn, session_id)
+
+    if state["awaiting"] == "reminder_date_only":
+        got_date, _ = _update_reminder_due(r, message)
+        if not got_date:
+            return "Date samajh nahi aayi. ‘Aaj’, ‘kal’, ‘5 August’ ya ‘05/08/2026’ boliye."
+        return _continue_reminder(r, conn, session_id)
+
+    if state["awaiting"] == "reminder_time_only":
+        _, got_time = _update_reminder_due(r, message, allow_bare_time=True)
+        if not got_time:
+            return "Time samajh nahi aaya. ‘Shaam 5 baje’, ‘5 PM’ ya ‘17:00’ boliye."
         return _continue_reminder(r, conn, session_id)
 
     if state["awaiting"] == "reminder_collect_amount":

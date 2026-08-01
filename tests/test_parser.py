@@ -179,3 +179,15 @@ def test_spoken_reminder_extracts_word_time_amount_and_phone():
     assert i.amount == 500
     assert i.phone == "8700048065"
     assert i.due_at.endswith("05:00")
+    assert i.reminder_date_provided is True
+    assert i.reminder_time_provided is True
+
+
+def test_reminder_tracks_missing_date_and_time_without_treating_defaults_as_user_input():
+    missing_time = parse("Ram ko kal 500 ka reminder lagao")
+    assert missing_time.reminder_date_provided is True
+    assert missing_time.reminder_time_provided is False
+
+    missing_date = parse("Ram ko 6 PM 500 ka reminder lagao")
+    assert missing_date.reminder_date_provided is False
+    assert missing_date.reminder_time_provided is True
