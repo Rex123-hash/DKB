@@ -118,9 +118,9 @@ the same canonical draft, deterministic calculator, confirmation rules and posti
 ### Private Google Cloud mode
 
 Google Cloud cannot be enabled from the browser or any API. The repository owner must edit the
-private constant in `app/config.py`, changing `GCP_ENABLED = False` to `True`, and restart the
-server. Changing it back to `False` restores the existing local provider order without changing
-the database or bill workflow. `GCP_ALLOW_LOCAL_FALLBACK` is a second code-only policy switch.
+private `GCP_ENABLED` constant in `app/config.py` and restart the server. `True` selects GCP;
+changing it to `False` restores the existing local provider order without changing the database
+or bill workflow. `GCP_ALLOW_LOCAL_FALLBACK` is a second code-only policy switch.
 
 GCP mode uses:
 

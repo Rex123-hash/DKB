@@ -26,7 +26,7 @@ load_dotenv()  # reads .env from cwd / project root if it exists
 # browser, an API route, a query parameter, or an environment variable.  Change
 # it here and restart the server when you want DukanBook to use the configured
 # Google Cloud providers.
-GCP_ENABLED = False
+GCP_ENABLED = True
 
 # If a Google Cloud request fails while the private switch is enabled, the
 # existing local providers may answer instead.  This is also code-only so an

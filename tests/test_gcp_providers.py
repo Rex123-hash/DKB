@@ -7,9 +7,12 @@ from app.billing.extractors import FakeBillExtractor, VertexBillExtractor, get_e
 from app.billing.models import BillDraftData
 
 
-def test_private_gcp_switch_defaults_off():
-    assert config.GCP_ENABLED is False
+def test_private_gcp_switch_ignores_environment(monkeypatch):
+    monkeypatch.setattr(config, "GCP_ENABLED", False)
+    monkeypatch.setenv("GCP_ENABLED", "true")
     assert config.gcp_enabled() is False
+    monkeypatch.setattr(config, "GCP_ENABLED", True)
+    assert config.gcp_enabled() is True
 
 
 def test_disabled_switch_keeps_original_local_provider(monkeypatch):
