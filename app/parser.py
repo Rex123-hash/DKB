@@ -153,8 +153,11 @@ def _extract_names(message: str) -> list[str]:
 
 def _extract_phone(text: str) -> str | None:
     """Return the raw phone digits if the command includes one, else None."""
-    digits = re.sub(r"\D", "", text)
-    return digits if len(digits) >= 10 else None
+    match = re.search(
+        r"(?<!\d)(?:(?:\+?91|0)[\s-]?)?([6-9](?:[\s-]?\d){9})(?!\d)",
+        text,
+    )
+    return re.sub(r"\D", "", match.group(1)) if match else None
 
 
 def _extract_due(text: str, now: datetime | None = None) -> str:
@@ -192,6 +195,16 @@ def _extract_due(text: str, now: datetime | None = None) -> str:
                                                 "night", "dopahar", "afternoon",
                                                 "शाम", "रात", "दोपहर"]):
                     hour = h + 12
+        else:
+            # Voice transcription commonly emits "paanch baje" / "पांच बजे".
+            for word, value in _NUM_UNITS.items():
+                if value <= 12 and re.search(rf"(?<!\w){re.escape(word)}\s*(?:baje|बजे)", text):
+                    hour = value
+                    if value <= 11 and _has(text, ["shaam", "sham", "evening", "raat",
+                                                          "night", "dopahar", "afternoon",
+                                                          "शाम", "रात", "दोपहर"]):
+                        hour += 12
+                    break
     return datetime.combine(d, time(hour, minute)).isoformat(timespec="minutes")
 
 
@@ -209,6 +222,7 @@ def parse(message: str) -> Intent:
             "reminder",
             party=_extract_party(message),
             amount=_extract_amount(cleaned),
+            phone=_extract_phone(text),
             due_at=_extract_due(text),
             message=message,
         )

@@ -29,6 +29,20 @@ def normalize_phone(raw: str) -> str | None:
     return None
 
 
+_NON_PARTY_NAMES = {
+    "me", "my", "myself", "someone", "customer", "party", "client",
+    "mujhe", "mujhko", "mere", "mera", "meri", "main", "khud", "apne",
+    "hum", "hume", "hamare", "kisi", "kisko", "liye", "ke", "ko", "for",
+}
+
+
+def valid_party_name(raw: str | None) -> bool:
+    """Reject pronouns/placeholders that must never become ledger accounts."""
+    name = re.sub(r"[^\w\s]", " ", (raw or "").strip().lower())
+    words = [word for word in name.split() if word]
+    return bool(words) and not all(word in _NON_PARTY_NAMES for word in words)
+
+
 def create_accounts(conn, names: list[str], party_type: str = "customer") -> dict:
     """Create accounts for each name, skipping names that already exist.
 
@@ -141,14 +155,29 @@ def schedule_reminder(
     message: str | None = None,
     amount: float | None = None,
     channel: str = "call",
+    skip_phone: bool = False,
 ) -> dict:
     """Create a payment/call reminder (call request) for a party at an ISO due_at.
 
     Snapshots the party's phone onto the request and builds a no-key WhatsApp link.
     """
+    pending = {
+        "party": party_name if valid_party_name(party_name) else None,
+        "due_at": due_at,
+        "message": message,
+        "amount": amount,
+        "channel": channel,
+    }
+    if not valid_party_name(party_name):
+        return {**pending, "needs_party": True}
+    if amount is None or amount <= 0:
+        return {**pending, "needs_amount": True}
+
     pid = db.get_or_create_party(conn, party_name)
     row = db.get_party(conn, pid)
-    phone = row["phone"] if row else None
+    phone = normalize_phone(row["phone"] if row else "")
+    if phone is None and not skip_phone:
+        return {**pending, "needs_phone": True}
     rid = db.add_reminder(conn, pid, due_at, message, amount=amount,
                           channel=channel, phone=phone)
     return {

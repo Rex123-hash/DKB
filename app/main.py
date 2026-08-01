@@ -98,8 +98,9 @@ class ReminderIn(BaseModel):
     party_id: int
     due_at: str
     message: str | None = None
-    amount: float | None = None
+    amount: float = Field(gt=0)
     channel: Literal["call", "whatsapp"] = "call"
+    skip_phone: bool = False
 
 
 class BillDraftReplaceIn(BaseModel):
@@ -425,9 +426,18 @@ def create_reminder(r: ReminderIn, conn=Depends(get_conn)) -> dict:
     party = db.get_party(conn, r.party_id)
     if party is None:
         raise HTTPException(status_code=404, detail="party not found")
-    rid = db.add_reminder(conn, r.party_id, r.due_at, r.message, amount=r.amount,
-                          channel=r.channel, phone=party["phone"])
-    return {"id": rid}
+    result = tools.schedule_reminder(
+        conn, party["name"], r.due_at, r.message, amount=r.amount,
+        channel=r.channel, skip_phone=r.skip_phone,
+    )
+    if result.get("needs_amount"):
+        raise HTTPException(status_code=409, detail="positive reminder amount is required")
+    if result.get("needs_phone"):
+        raise HTTPException(
+            status_code=409,
+            detail="10-digit phone is required; provide one or explicitly skip",
+        )
+    return {"id": result["id"]}
 
 
 @app.post("/reminders/{reminder_id}/done")

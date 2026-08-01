@@ -56,7 +56,12 @@ SYSTEM_PROMPT = (
     "question word as a name. "
     "For a reminder or call request use schedule_reminder with an ISO 8601 due_at from "
     "the current date-time below ('kal' = tomorrow, 'Monday 10 baje' = next Monday "
-    "10:00); also pass the rupee amount and a short description when mentioned. Do not "
+    "10:00). A reminder requires a real person's/business's name and a positive rupee "
+    "amount. Pronouns such as 'mujhe', 'mere', 'me' or 'myself' are NOT party names; "
+    "ask 'kiske liye?' instead of creating an account for them. A phone "
+    "number is mandatory for reminders unless the user explicitly answers 'skip'; never "
+    "assume that choice. If the tool reports needs_phone, ask for a 10-digit mobile number "
+    "or tell the user they may say 'skip'. Do not "
     "read any link or URL aloud in your reply. For weather use get_weather, for maths "
     "use calculate. For live cricket scores, say you don't have that yet."
 )
@@ -208,7 +213,8 @@ TOOL_SCHEMAS = [
 ]
 
 
-def _dispatch(name: str, args: dict, conn, created_sink: list | None = None) -> dict | list | None:
+def _dispatch(name: str, args: dict, conn, created_sink: list | None = None,
+              reminder_sink: list | None = None) -> dict | list | None:
     if name == "create_account":
         res = tools.create_accounts(
             conn, [args["party_name"]], args.get("party_type", "customer")
@@ -231,7 +237,7 @@ def _dispatch(name: str, args: dict, conn, created_sink: list | None = None) -> 
     if name == "search_knowledge":
         return tools.search_knowledge(conn, args["query"])
     if name == "schedule_reminder":
-        return tools.schedule_reminder(
+        result = tools.schedule_reminder(
             conn,
             party_name=args["party_name"],
             due_at=args["due_at"],
@@ -239,6 +245,10 @@ def _dispatch(name: str, args: dict, conn, created_sink: list | None = None) -> 
             amount=args.get("amount"),
             channel=args.get("channel", "call"),
         )
+        if any(result.get(key) for key in ("needs_party", "needs_amount", "needs_phone")) \
+                and reminder_sink is not None:
+            reminder_sink.append(result)
+        return result
     if name == "list_reminders":
         return tools.list_reminders(conn)
     if name == "get_weather":
@@ -319,7 +329,7 @@ def _clean(text: str) -> str:
 
 
 def run(message: str, conn, lang: str = "auto", max_steps: int = 5,
-        created_sink: list | None = None) -> str:
+        created_sink: list | None = None, reminder_sink: list | None = None) -> str:
     api_key = os.environ.get("GEMINI_API_KEY") or os.environ.get("GROQ_API_KEY") or "local"
     now = datetime.now().strftime("%A, %Y-%m-%d %H:%M")
     messages: list[dict] = [
@@ -336,7 +346,9 @@ def run(message: str, conn, lang: str = "auto", max_steps: int = 5,
             return _clean(msg.get("content")) or "..."
         for tc in tool_calls:
             args = json.loads(tc["function"].get("arguments") or "{}")
-            result = _dispatch(tc["function"]["name"], args, conn, created_sink)
+            result = _dispatch(
+                tc["function"]["name"], args, conn, created_sink, reminder_sink
+            )
             messages.append(
                 {
                     "role": "tool",

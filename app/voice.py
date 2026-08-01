@@ -263,8 +263,10 @@ def _gcp_synthesize(text: str, lang: str) -> bytes:
     client = texttospeech.TextToSpeechClient(client_options=client_options)
     base_lang = (lang or "hi").split("-")[0].lower()
     language_code = "en-IN" if base_lang == "en" else "hi-IN"
+    # Leda has a younger, cleaner delivery than Aoede for a modern product
+    # assistant. Keep the same voice identity across Hindi and Indian English.
     default_voice = (
-        "en-IN-Chirp3-HD-Aoede" if base_lang == "en" else "hi-IN-Chirp3-HD-Aoede"
+        "en-IN-Chirp3-HD-Leda" if base_lang == "en" else "hi-IN-Chirp3-HD-Leda"
     )
     voice_name = os.environ.get(
         "GCP_TTS_VOICE_EN" if base_lang == "en" else "GCP_TTS_VOICE_HI",
@@ -279,7 +281,7 @@ def _gcp_synthesize(text: str, lang: str) -> bytes:
             ),
             "audio_config": texttospeech.AudioConfig(
                 audio_encoding=texttospeech.AudioEncoding.MP3,
-                speaking_rate=float(os.environ.get("GCP_TTS_SPEAKING_RATE", "1.0")),
+                speaking_rate=float(os.environ.get("GCP_TTS_SPEAKING_RATE", "1.08")),
             ),
         }
     )
@@ -316,6 +318,9 @@ _EMOJI_RE = re.compile(
 
 def speakable(text: str) -> str:
     """The part of a reply worth reading aloud: no emoji, no double spaces."""
+    # Citations remain visible in the chat for trust, but reading filenames
+    # aloud makes the assistant sound robotic.
+    text = re.sub(r"\[[^\]]+\.(?:md|txt|pdf)[^\]]*\]", "", text, flags=re.I)
     return re.sub(r"\s{2,}", " ", _EMOJI_RE.sub("", text)).strip()
 
 

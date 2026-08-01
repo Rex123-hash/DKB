@@ -327,6 +327,9 @@ body{
 .field input,.field select{width:100%;border:1.5px solid var(--line);border-radius:10px;
   padding:10px 12px;font-family:inherit;font-size:.95rem;outline:none}
 .field input:focus,.field select:focus{border-color:var(--brand)}
+.check-row{display:flex;align-items:center;gap:8px;margin:-2px 0 12px;
+  color:var(--muted);font-size:.8rem;cursor:pointer}
+.check-row input{accent-color:var(--brand)}
 .seg{display:flex;gap:8px}
 .seg button{flex:1;border:1.5px solid var(--line);background:#fff;border-radius:10px;padding:9px;
   font-family:inherit;cursor:pointer;font-weight:600;color:var(--muted)}

@@ -11,7 +11,10 @@ def _fresh():
 # --- reminders ---
 def test_schedule_and_list_reminder():
     conn = _fresh()
-    res = tools.schedule_reminder(conn, "Ramesh", "2026-06-20T10:00:00", "udhaar yaad dilao")
+    res = tools.schedule_reminder(
+        conn, "Ramesh", "2026-06-20T10:00:00", "udhaar yaad dilao",
+        amount=500, skip_phone=True,
+    )
     assert res["party"] == "Ramesh"
     pending = tools.list_reminders(conn, "pending")
     assert len(pending) == 1
@@ -21,7 +24,9 @@ def test_schedule_and_list_reminder():
 
 def test_mark_reminder_done():
     conn = _fresh()
-    rid = tools.schedule_reminder(conn, "Ramesh", "2026-06-20T10:00:00")["id"]
+    rid = tools.schedule_reminder(
+        conn, "Ramesh", "2026-06-20T10:00:00", amount=500, skip_phone=True
+    )["id"]
     db.mark_reminder_done(conn, rid)
     assert tools.list_reminders(conn, "pending") == []
     assert len(tools.list_reminders(conn, "done")) == 1

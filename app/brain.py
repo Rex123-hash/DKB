@@ -84,7 +84,10 @@ _SKIP_WORDS = {"skip", "chhodo", "chhod", "chhoddo", "baad", "rehne", "nahi",
 # Guided call-reminder ("maango") dialog: name -> [number] -> purpose -> time.
 # Roman 'maang' covers maango/maangna/maangne; Devanagari मांग/माँग covers voice input.
 _COLLECT_WORDS = ("maang", "मांग", "माँग", "paise lene", "payment maang")
-_REMINDER_STEPS = ("reminder_phone", "reminder_purpose", "reminder_time")
+_REMINDER_STEPS = (
+    "reminder_phone", "reminder_purpose", "reminder_time", "reminder_party_only",
+    "reminder_amount_only", "reminder_phone_only", "reminder_collect_amount"
+)
 _CANCEL_PHRASES = {"cancel", "rehne do", "chhod do", "band karo", "ruko", "cancel karo"}
 
 
@@ -132,17 +135,25 @@ def respond(message: str, lang: str = "auto", conn=None, session_id: str = "defa
             return _start_create(intent, conn, session_id)
         if intent.action == "set_phone":
             return _handle_set_phone(intent, conn)
+        if intent.action == "reminder":
+            return _start_reminder(intent, conn, session_id)
 
         # 3. Everything else: LLM brain if a key is set, else the offline path.
         if config.has_llm():
             try:
                 created: list[dict] = []
-                reply = llm.run(message, conn, lang, created_sink=created)
+                pending_reminders: list[dict] = []
+                reply = llm.run(
+                    message, conn, lang, created_sink=created,
+                    reminder_sink=pending_reminders,
+                )
                 # If the LLM opened account(s) (e.g. a phrasing the parser missed,
                 # like a typo'd "craete"), take over with our phone sub-dialog so
                 # the follow-up is consistent with the deterministic path.
                 if created:
                     return _begin_phone_capture(created, session_id)
+                if pending_reminders:
+                    return _begin_reminder_details(pending_reminders[0], session_id)
                 return reply
             except Exception:
                 pass  # graceful fallback to the offline path
@@ -267,12 +278,87 @@ def _ask_purpose(r: dict) -> str:
     return f"{r['name']}{num}, unse {amt}maangne ka purpose kya hai?"
 
 
+def _begin_reminder_details(reminder: dict, session_id: str) -> str:
+    """Pause a reminder and ask for the first mandatory detail that is missing."""
+    pending = {
+        "name": reminder.get("party"),
+        "due_at": reminder.get("due_at"),
+        "purpose": reminder.get("message"),
+        "amount": reminder.get("amount"),
+        "channel": reminder.get("channel", "call"),
+        "provided_phone": reminder.get("provided_phone"),
+    }
+    if reminder.get("needs_party") or not tools.valid_party_name(pending["name"]):
+        awaiting = "reminder_party_only"
+        question = "Please specify: reminder kiske liye lagana hai? Vyakti ya business ka naam bataiye."
+    elif reminder.get("needs_amount") or not pending.get("amount"):
+        awaiting = "reminder_amount_only"
+        question = f"{pending['name']} ke reminder ki amount kitni hai? Rupees mein bataiye."
+    else:
+        awaiting = "reminder_phone_only"
+        question = (
+            f"{pending['name']} ka 10-digit mobile number bataiye. Phone ke bina reminder "
+            "save nahi hoga; bina number ke rakhna ho to ‘skip’ boliye."
+        )
+    _SESSIONS[session_id] = {"awaiting": awaiting, "reminder": pending}
+    return question
+
+
+def _continue_reminder(r: dict, conn, session_id: str, *, skip_phone: bool = False) -> str:
+    result = tools.schedule_reminder(
+        conn,
+        r.get("name"),
+        r.get("due_at"),
+        message=r.get("purpose"),
+        amount=r.get("amount"),
+        channel=r.get("channel", "call"),
+        skip_phone=skip_phone,
+    )
+    provided_phone = tools.normalize_phone(r.get("provided_phone") or "")
+    if result.get("needs_phone") and provided_phone:
+        tools.set_phone(conn, r["name"], provided_phone)
+        result = tools.schedule_reminder(
+            conn,
+            r["name"],
+            r.get("due_at"),
+            message=r.get("purpose"),
+            amount=r.get("amount"),
+            channel=r.get("channel", "call"),
+        )
+    if any(result.get(key) for key in ("needs_party", "needs_amount", "needs_phone")):
+        result["provided_phone"] = r.get("provided_phone")
+        return _begin_reminder_details(result, session_id)
+    _SESSIONS.pop(session_id, None)
+    return _fmt_reminder(result)
+
+
+def _start_reminder(intent, conn, session_id: str) -> str:
+    """Create an ordinary reminder only after all mandatory details are present."""
+    pending = {
+        "party": intent.party if tools.valid_party_name(intent.party) else None,
+        "due_at": intent.due_at,
+        "message": intent.message,
+        "amount": intent.amount,
+        "channel": "call",
+        "provided_phone": intent.phone,
+    }
+    if pending["party"] is None:
+        pending["needs_party"] = True
+        return _begin_reminder_details(pending, session_id)
+    internal = {
+        "name": pending["party"], "due_at": pending["due_at"],
+        "purpose": pending["message"], "amount": pending["amount"],
+        "channel": pending["channel"], "provided_phone": pending["provided_phone"],
+    }
+    return _continue_reminder(internal, conn, session_id)
+
+
 def _start_collect(message: str, conn, session_id: str) -> str:
     """Begin the guided call-reminder dialog from 'Rahul se 500 maango'."""
     name = _parser._extract_party(message)
     # A 10-digit phone must never be read as the rupee amount.
     amount = _parser._extract_amount(re.sub(r"\d{10,}", " ", message))
-    if not name:
+    if not tools.valid_party_name(name):
         return "Kis se paise maangne hain? Naam bataiye — jaise ‘Rahul se 500 maango’."
 
     row = db.find_party_by_name(conn, name)
@@ -281,6 +367,9 @@ def _start_collect(message: str, conn, session_id: str) -> str:
         row = db.get_party(conn, pid)
 
     r = {"name": row["name"], "amount": amount, "phone": row["phone"], "purpose": None}
+    if amount is None or amount <= 0:
+        _SESSIONS[session_id] = {"awaiting": "reminder_collect_amount", "reminder": r}
+        return f"{row['name']} se kitni amount leni hai? Rupees mein bataiye."
     if row["phone"]:
         _SESSIONS[session_id] = {"awaiting": "reminder_purpose", "reminder": r}
         return _ask_purpose(r)
@@ -295,6 +384,41 @@ def _handle_reminder_dialog(state: dict, message: str, conn, session_id: str) ->
         _SESSIONS.pop(session_id, None)
         return "Theek hai, reminder cancel kar diya."
 
+    if state["awaiting"] == "reminder_party_only":
+        candidate = _parser._extract_party(message)
+        if not tools.valid_party_name(candidate):
+            return "Please specify kiske liye reminder hai — vyakti ya business ka actual naam bataiye."
+        r["name"] = candidate.strip()
+        inline_phone = _parser._extract_phone(message)
+        if inline_phone:
+            r["provided_phone"] = inline_phone
+        amount_text = re.sub(r"\d{10,}", " ", message)
+        inline_amount = _parser._extract_amount(amount_text.lower())
+        if inline_amount and inline_amount > 0:
+            r["amount"] = inline_amount
+        return _continue_reminder(r, conn, session_id)
+
+    if state["awaiting"] == "reminder_amount_only":
+        inline_phone = _parser._extract_phone(message)
+        if inline_phone:
+            r["provided_phone"] = inline_phone
+        amount = _parser._extract_amount(re.sub(r"\d{10,}", " ", message).lower())
+        if amount is None or amount <= 0:
+            return f"{r['name']} ke reminder ki positive amount rupees mein bataiye — jaise ‘500’."
+        r["amount"] = amount
+        return _continue_reminder(r, conn, session_id)
+
+    if state["awaiting"] == "reminder_collect_amount":
+        amount = _parser._extract_amount(message.lower())
+        if amount is None or amount <= 0:
+            return f"{r['name']} se leni wali positive amount bataiye — jaise ‘500’."
+        r["amount"] = amount
+        if r.get("phone"):
+            state["awaiting"] = "reminder_purpose"
+            return _ask_purpose(r)
+        state["awaiting"] = "reminder_phone"
+        return f"{r['name']} ka number kya hai? (ya ‘skip’ boliye)"
+
     if state["awaiting"] == "reminder_phone":
         phone = tools.normalize_phone(message)
         if phone:
@@ -303,10 +427,24 @@ def _handle_reminder_dialog(state: dict, message: str, conn, session_id: str) ->
             state["awaiting"] = "reminder_purpose"
             return _ask_purpose(r)
         tokens = re.sub(r"[^\w\s]", " ", message.lower()).split()
-        if any(t in _SKIP_WORDS for t in tokens):
+        if "skip" in tokens:
+            r["phone_skipped"] = True
             state["awaiting"] = "reminder_purpose"
             return _ask_purpose(r)
         return f"Yeh number theek nahi laga. {r['name']} ka 10-digit mobile bataiye (ya ‘skip’)."
+
+    if state["awaiting"] == "reminder_phone_only":
+        phone = tools.normalize_phone(message)
+        tokens = re.sub(r"[^\w\s]", " ", message.lower()).split()
+        skipped = "skip" in tokens
+        if not phone and not skipped:
+            return (
+                f"Yeh number theek nahi laga. {r['name']} ka 10-digit mobile bataiye, "
+                "ya bina number ke reminder rakhne ke liye ‘skip’ boliye."
+            )
+        if phone:
+            tools.set_phone(conn, r["name"], message)
+        return _continue_reminder(r, conn, session_id, skip_phone=skipped)
 
     if state["awaiting"] == "reminder_purpose":
         r["purpose"] = message.strip()
@@ -316,7 +454,8 @@ def _handle_reminder_dialog(state: dict, message: str, conn, session_id: str) ->
     # reminder_time: parse the time, save the call reminder, finish.
     due = _parser._extract_due(message.lower())
     tools.schedule_reminder(conn, r["name"], due, message=r.get("purpose"),
-                            amount=r.get("amount"), channel="call")
+                            amount=r.get("amount"), channel="call",
+                            skip_phone=bool(r.get("phone_skipped")))
     _SESSIONS.pop(session_id, None)
     when = _humanize_due(due)
     return (f"Theek hai, {r['name']} ko {when} par call kar diya jayega. "

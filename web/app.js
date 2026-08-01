@@ -994,9 +994,14 @@ function phoneModal(p) {
 function reminderModal(p) {
   const tomorrow = new Date(Date.now() + 864e5);
   const def = tomorrow.toISOString().slice(0, 10) + "T10:00";
+  const phoneFields = p.phone
+    ? `<div class="field"><label>Mobile</label><div>${esc(p.phone)}</div></div>`
+    : `<div class="field"><label>Mobile (required)</label><input id="rPhone" inputmode="numeric" placeholder="10-digit mobile" /></div>
+       <label class="check-row"><input id="skipPhone" type="checkbox" /> Save without phone (explicit skip)</label>`;
   showModal(`<h3>Reminder — ${esc(p.name)}</h3>
+    ${phoneFields}
     <div class="field"><label>When</label><input id="due" type="datetime-local" value="${def}" /></div>
-    <div class="field"><label>Amount ₹ (optional)</label><input id="rAmt" type="number" placeholder="0" /></div>
+    <div class="field"><label>Amount ₹ (required)</label><input id="rAmt" type="number" min="1" placeholder="500" /></div>
     <div class="field"><label>Channel</label>
       <div class="seg" id="ch"><button class="on" data-c="call">${chatIcon("phone")} Call</button><button data-c="whatsapp">${chatIcon("whatsapp")} WhatsApp</button></div></div>
     <div class="field"><label>Note</label><input id="rMsg" placeholder="payment ke liye yaad dilao" /></div>
@@ -1008,9 +1013,14 @@ function reminderModal(p) {
   $("#cancel").onclick = closeModal;
   $("#saveRem").onclick = async () => {
     const due = $("#due").value; if (!due) return toast("Time daaliye");
-    const amount = parseFloat($("#rAmt").value) || null;
+    const amount = parseFloat($("#rAmt").value);
+    if (!(amount > 0)) return toast("Positive amount daaliye");
     try {
-      await postJSON("/reminders", { party_id: p.id, due_at: due + ":00", message: $("#rMsg").value.trim() || null, amount, channel });
+      const enteredPhone = $("#rPhone")?.value.trim() || "";
+      const skipPhone = Boolean($("#skipPhone")?.checked);
+      if (!p.phone && !enteredPhone && !skipPhone) return toast("10-digit mobile daaliye ya Skip chuniye");
+      if (enteredPhone) await postJSON(`/parties/${p.id}/phone`, { phone: enteredPhone });
+      await postJSON("/reminders", { party_id: p.id, due_at: due + ":00", message: $("#rMsg").value.trim() || null, amount, channel, skip_phone: skipPhone });
       closeModal(); toast("Reminder set"); loadData();
     } catch (e) { toast("Error: " + e.message); }
   };

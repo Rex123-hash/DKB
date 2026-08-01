@@ -119,12 +119,30 @@ def test_schedule_reminder_snapshots_phone_and_link():
     assert row["phone"] == "9876543210" and row["amount"] == 5000
 
 
-def test_schedule_reminder_without_phone_has_no_link():
+def test_schedule_reminder_without_phone_requires_explicit_skip():
     conn = _fresh()
     res = tools.schedule_reminder(conn, "Ghosh", "2026-06-24T10:00", amount=200)
-    assert res["phone"] is None
-    assert res["whatsapp_link"] is None
-    assert res["call_link"] is None
+    assert res["needs_phone"] is True
+    assert db.list_reminders(conn) == []
+
+    skipped = tools.schedule_reminder(
+        conn, "Ghosh", "2026-06-24T10:00", amount=200, skip_phone=True
+    )
+    assert skipped["phone"] is None
+    assert skipped["whatsapp_link"] is None
+    assert skipped["call_link"] is None
+    assert len(db.list_reminders(conn)) == 1
+
+
+def test_schedule_reminder_rejects_pronoun_and_missing_amount_before_writing():
+    conn = _fresh()
+    pronoun = tools.schedule_reminder(conn, "mujhe", "2026-06-24T10:00", amount=500)
+    assert pronoun["needs_party"] is True
+    assert db.find_party_by_name(conn, "mujhe") is None
+
+    missing_amount = tools.schedule_reminder(conn, "Aman", "2026-06-24T10:00")
+    assert missing_amount["needs_amount"] is True
+    assert db.find_party_by_name(conn, "Aman") is None
 
 
 def test_call_link_builds_and_rejects():
@@ -137,5 +155,7 @@ def test_schedule_reminder_includes_call_link():
     conn = _fresh()
     tools.create_accounts(conn, ["Rahul"])
     tools.set_phone(conn, "Rahul", "9876543210")
-    res = tools.schedule_reminder(conn, "Rahul", "2026-06-24T10:00", channel="call")
+    res = tools.schedule_reminder(
+        conn, "Rahul", "2026-06-24T10:00", amount=500, channel="call"
+    )
     assert res["call_link"] == "tel:+919876543210"

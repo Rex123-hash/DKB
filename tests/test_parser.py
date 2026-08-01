@@ -171,3 +171,11 @@ def test_reminder_phone_is_not_read_as_amount():
     i = parse("Ramesh ko 9876543210 pe kal call karna")
     assert i.action == "reminder"
     assert i.amount is None  # the phone number is not the rupee amount
+
+
+def test_spoken_reminder_extracts_word_time_amount_and_phone():
+    i = parse("mujhe kal paanch baje paanch sau rupaye ka reminder, phone 8700048065")
+    assert i.party == "mujhe"
+    assert i.amount == 500
+    assert i.phone == "8700048065"
+    assert i.due_at.endswith("05:00")

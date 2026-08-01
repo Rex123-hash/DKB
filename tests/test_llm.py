@@ -102,6 +102,8 @@ def test_llm_create_account_tool(monkeypatch):
 def test_llm_schedule_reminder_with_amount(monkeypatch):
     conn = db.get_connection(":memory:")
     db.init_db(conn)
+    tools.create_accounts(conn, ["Rahul"])
+    tools.set_phone(conn, "Rahul", "9876543210")
 
     calls = {"n": 0}
 

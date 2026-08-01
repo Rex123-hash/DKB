@@ -21,7 +21,8 @@ shopkeeper does not have to learn complicated software to run their own accounts
 - Shows and updates a phone number on each account, with one-tap Call and WhatsApp buttons.
 - Creates call and payment reminders by voice, for example "kal Rahul ko 5000 ke payment ke
   liye call karna", storing the name, amount, message and time, and giving ready WhatsApp and
-  click-to-call links to act on.
+  click-to-call links to act on. A real party name and positive amount are mandatory; a phone
+  is also required unless the shopkeeper explicitly says `skip`.
 - Answers questions about GST, income tax, loans, licences, stock and general business, using
   a set of official reference notes so the information stays reliable.
 - Works by voice and by text, in Hindi, English and Hinglish, and speaks the reply back.
@@ -128,7 +129,8 @@ GCP mode uses:
 - Vertex AI Gemini vision for structured bill extraction, optionally enriched by a Document AI
   OCR processor. The original scan remains authoritative and calculations remain deterministic.
 - Speech-to-Text V2 Chirp 3 for Hindi, Indian English and Hinglish input.
-- Text-to-Speech Chirp 3 HD for the spoken Indian voice.
+- Text-to-Speech Chirp 3 HD with the youthful Leda voice and a slightly faster,
+  conversational pace for spoken Hindi, Indian English and Hinglish.
 
 Enable the required APIs and authenticate locally with Application Default Credentials:
 

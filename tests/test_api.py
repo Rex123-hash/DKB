@@ -48,11 +48,26 @@ def test_chat_still_works(client):
 
 
 def test_reminders_flow(client):
-    pid = client.post("/parties", json={"name": "Ramesh", "type": "customer"}).json()["id"]
+    pid = client.post(
+        "/parties",
+        json={"name": "Ramesh", "type": "customer", "phone": "9876543210"},
+    ).json()["id"]
     rid = client.post("/reminders",
                       json={"party_id": pid, "due_at": "2026-06-20T10:00:00",
-                            "message": "udhaar yaad"}).json()["id"]
+                            "message": "udhaar yaad", "amount": 500}).json()["id"]
     pending = client.get("/reminders").json()
     assert len(pending) == 1 and pending[0]["party_name"] == "Ramesh"
     client.post(f"/reminders/{rid}/done")
     assert client.get("/reminders").json() == []
+
+
+def test_reminder_api_requires_phone_or_explicit_skip(client):
+    pid = client.post("/parties", json={"name": "Sita", "type": "customer"}).json()["id"]
+    payload = {"party_id": pid, "due_at": "2026-06-20T10:00:00", "amount": 500}
+
+    blocked = client.post("/reminders", json=payload)
+    assert blocked.status_code == 409
+    assert client.get("/reminders").json() == []
+
+    skipped = client.post("/reminders", json={**payload, "skip_phone": True})
+    assert skipped.status_code == 200

@@ -89,7 +89,8 @@ def test_llm_create_hands_off_to_phone_capture(conn, monkeypatch):
     # Simulate a phrasing the parser misses, where the LLM creates via its tool.
     from app import llm
 
-    def fake_llm_run(message, c, lang="auto", max_steps=5, created_sink=None):
+    def fake_llm_run(message, c, lang="auto", max_steps=5, created_sink=None,
+                     reminder_sink=None):
         from app import tools
         res = tools.create_accounts(c, ["Suryaa"])
         if created_sink is not None:
@@ -141,6 +142,64 @@ def test_offline_reminder_creates_row_without_reading_url(conn):
     assert len(rows) == 1
     assert rows[0]["amount"] == 5000
     assert rows[0]["phone"] == "9876543210"
+
+
+def test_reminder_without_phone_waits_for_phone_or_skip(conn):
+    from app import tools
+    tools.create_accounts(conn, ["Sita"])
+    s = "ordinary-reminder"
+
+    first = brain.respond("Sita ko kal 500 ka payment reminder lagao", conn=conn, session_id=s)
+    assert "10-digit" in first and "skip" in first.lower()
+    assert db.list_reminders(conn) == []
+
+    invalid = brain.respond("1234", conn=conn, session_id=s)
+    assert "theek nahi" in invalid.lower()
+    assert db.list_reminders(conn) == []
+
+    done = brain.respond("9123456780", conn=conn, session_id=s)
+    assert "reminder laga diya" in done
+    assert db.list_reminders(conn)[0]["phone"] == "9123456780"
+
+
+def test_reminder_without_phone_allows_explicit_skip(conn):
+    from app import tools
+    tools.create_accounts(conn, ["Mohan"])
+    s = "ordinary-reminder-skip"
+
+    brain.respond("Mohan ko kal 500 ke liye call karna", conn=conn, session_id=s)
+    not_skipped = brain.respond("number nahi hai", conn=conn, session_id=s)
+    assert "skip" in not_skipped.lower()
+    assert db.list_reminders(conn) == []
+    done = brain.respond("skip", conn=conn, session_id=s)
+
+    assert "reminder laga diya" in done
+    assert db.list_reminders(conn)[0]["phone"] is None
+
+
+def test_reminder_pronoun_asks_party_then_missing_amount(conn):
+    s = "pronoun-reminder"
+    first = brain.respond("mujhe kal payment yaad dilana", conn=conn, session_id=s)
+    assert "kiske liye" in first.lower()
+    assert db.find_party_by_name(conn, "mujhe") is None
+
+    second = brain.respond("Aman ke liye", conn=conn, session_id=s)
+    assert "amount" in second.lower()
+    assert db.list_reminders(conn) == []
+
+    third = brain.respond("750", conn=conn, session_id=s)
+    assert "10-digit" in third
+    done = brain.respond("skip", conn=conn, session_id=s)
+    assert "reminder laga diya" in done
+    assert db.list_reminders(conn)[0]["amount"] == 750
+
+
+def test_party_followup_can_include_amount_without_repeat_question(conn):
+    s = "party-and-amount"
+    brain.respond("mujhe kal reminder lagao", conn=conn, session_id=s)
+    reply = brain.respond("Suresh ke liye 900", conn=conn, session_id=s)
+    assert "10-digit" in reply
+    assert "amount" not in reply.lower()
 
 
 # --- guided "maango" call-reminder dialog (name -> [number] -> purpose -> time) ---
