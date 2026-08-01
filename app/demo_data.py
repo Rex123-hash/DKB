@@ -10,7 +10,13 @@ from app import db
 
 
 def reset(conn) -> None:
-    """Clear all ledger data (parties, transactions, reminders). KB untouched."""
+    """Clear shop/demo data, including billing side effects. KB untouched."""
+    conn.execute("DELETE FROM cashbook_entry")
+    conn.execute("DELETE FROM stock_movement")
+    conn.execute("DELETE FROM bill_item")
+    conn.execute("DELETE FROM bill")
+    conn.execute("DELETE FROM bill_draft")
+    conn.execute("DELETE FROM product")
     conn.execute('DELETE FROM "transaction"')
     conn.execute("DELETE FROM reminder")
     conn.execute("DELETE FROM party")

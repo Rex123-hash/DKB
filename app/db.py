@@ -61,6 +61,108 @@ CREATE TABLE IF NOT EXISTS kb_chunk (
     source    TEXT,
     embedding BLOB
 );
+
+CREATE TABLE IF NOT EXISTS bill_draft (
+    id                  TEXT PRIMARY KEY,
+    session_id          TEXT NOT NULL,
+    status              TEXT NOT NULL CHECK (
+        status IN (
+            'uploaded', 'extracting', 'needs_information',
+            'ready_for_review', 'confirmed', 'posting',
+            'finalized', 'failed'
+        )
+    ),
+    source_filename     TEXT NOT NULL,
+    source_mime         TEXT NOT NULL,
+    source_path         TEXT NOT NULL,
+    source_sha256       TEXT NOT NULL,
+    extractor_backend   TEXT,
+    data_json           TEXT NOT NULL DEFAULT '{}',
+    calculation_json    TEXT NOT NULL DEFAULT '{}',
+    error               TEXT,
+    bill_id             INTEGER,
+    created_at          TEXT NOT NULL,
+    updated_at          TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_bill_draft_session
+    ON bill_draft(session_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_bill_draft_sha
+    ON bill_draft(session_id, source_sha256);
+
+CREATE TABLE IF NOT EXISTS bill (
+    id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+    draft_id            TEXT NOT NULL UNIQUE REFERENCES bill_draft(id),
+    type                TEXT NOT NULL CHECK (type IN ('sale', 'purchase')),
+    bill_number         TEXT NOT NULL,
+    bill_date           TEXT NOT NULL,
+    party_id            INTEGER NOT NULL REFERENCES party(id),
+    party_name          TEXT NOT NULL,
+    party_phone         TEXT,
+    gstin               TEXT,
+    gst_mode            TEXT NOT NULL CHECK (gst_mode IN ('gst', 'non_gst')),
+    tax_scheme          TEXT CHECK (tax_scheme IN ('cgst_sgst', 'igst')),
+    gst_rate            TEXT,
+    payment_status      TEXT NOT NULL CHECK (
+        payment_status IN ('paid', 'credit', 'partial')
+    ),
+    subtotal_paise      INTEGER NOT NULL,
+    discount_paise      INTEGER NOT NULL DEFAULT 0,
+    extra_charge_paise  INTEGER NOT NULL DEFAULT 0,
+    taxable_paise       INTEGER NOT NULL,
+    cgst_paise          INTEGER NOT NULL DEFAULT 0,
+    sgst_paise          INTEGER NOT NULL DEFAULT 0,
+    igst_paise          INTEGER NOT NULL DEFAULT 0,
+    round_off_paise     INTEGER NOT NULL DEFAULT 0,
+    grand_total_paise   INTEGER NOT NULL,
+    paid_paise          INTEGER NOT NULL DEFAULT 0,
+    note                TEXT,
+    created_at          TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_bill_type_date ON bill(type, bill_date DESC);
+CREATE INDEX IF NOT EXISTS idx_bill_party ON bill(party_id, bill_date DESC);
+
+CREATE TABLE IF NOT EXISTS bill_item (
+    id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+    bill_id             INTEGER NOT NULL REFERENCES bill(id) ON DELETE CASCADE,
+    name                TEXT NOT NULL,
+    quantity            TEXT NOT NULL,
+    unit                TEXT,
+    unit_price_paise    INTEGER NOT NULL,
+    line_total_paise    INTEGER NOT NULL,
+    written_total_paise INTEGER,
+    hsn                 TEXT,
+    gst_rate            TEXT
+);
+
+CREATE TABLE IF NOT EXISTS product (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    name        TEXT NOT NULL COLLATE NOCASE UNIQUE,
+    quantity    TEXT NOT NULL DEFAULT '0',
+    unit        TEXT,
+    updated_at  TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS stock_movement (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    bill_id     INTEGER NOT NULL REFERENCES bill(id),
+    product_id  INTEGER NOT NULL REFERENCES product(id),
+    direction   TEXT NOT NULL CHECK (direction IN ('in', 'out')),
+    quantity    TEXT NOT NULL,
+    created_at  TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS cashbook_entry (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    bill_id     INTEGER REFERENCES bill(id),
+    direction   TEXT NOT NULL CHECK (direction IN ('in', 'out')),
+    amount_paise INTEGER NOT NULL CHECK (amount_paise > 0),
+    note        TEXT,
+    entry_date  TEXT NOT NULL,
+    created_at  TEXT NOT NULL,
+    UNIQUE (bill_id)
+);
 """
 
 
@@ -79,7 +181,10 @@ def get_connection(db_path: str | Path | None = None) -> sqlite3.Connection:
     parent = Path(db_path).parent
     if str(parent) and not parent.exists():
         parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(str(db_path))
+    # FastAPI may create and clean up a sync dependency on different worker
+    # threads. Each request still gets its own connection, but SQLite must allow
+    # that connection to cross the dependency/endpoint thread boundary.
+    conn = sqlite3.connect(str(db_path), check_same_thread=False)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
     return conn

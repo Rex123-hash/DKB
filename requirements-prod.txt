@@ -13,5 +13,6 @@ requests
 httpx
 python-dotenv
 python-multipart
+reportlab
 numpy
 edge-tts

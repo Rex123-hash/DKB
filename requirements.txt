@@ -5,6 +5,7 @@ requests
 httpx
 python-dotenv
 python-multipart
+reportlab
 fastembed
 numpy
 faster-whisper

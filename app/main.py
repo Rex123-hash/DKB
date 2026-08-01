@@ -15,11 +15,15 @@ from typing import Literal
 import pathlib
 
 from fastapi import Depends, FastAPI, File, Form, HTTPException, UploadFile
-from fastapi.responses import RedirectResponse
+from fastapi.responses import RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from app import brain, config, db, demo_data, rag, tools, voice  # noqa: F401  (config loads .env)
+from app.billing import models as billing_models
+from app.billing import pdf as billing_pdf
+from app.billing import repository as billing_repository
+from app.billing import service as billing_service
 
 WEB_DIR = pathlib.Path(__file__).resolve().parent.parent / "web"
 
@@ -62,7 +66,7 @@ async def lifespan(app: FastAPI):
     yield
 
 
-app = FastAPI(title="Dukanbook AI Assistant", version="0.2.0", lifespan=lifespan)
+app = FastAPI(title="Dukanbook AI Assistant", version="0.3.0", lifespan=lifespan)
 
 
 # ---- models ----
@@ -96,6 +100,14 @@ class ReminderIn(BaseModel):
     message: str | None = None
     amount: float | None = None
     channel: Literal["call", "whatsapp"] = "call"
+
+
+class BillDraftReplaceIn(BaseModel):
+    data: billing_models.BillDraftData
+
+
+class BillDraftAnswerIn(BaseModel):
+    answer: str = Field(min_length=1, max_length=2000)
 
 
 # ---- health ----
@@ -183,6 +195,174 @@ def add_transaction(t: TransactionIn, conn=Depends(get_conn)) -> dict:
         raise HTTPException(status_code=404, detail="party not found")
     db.add_transaction(conn, t.party_id, t.type, t.amount, note=t.note)
     return {"party_id": t.party_id, "balance": db.get_balance(conn, t.party_id)}
+
+
+# ---- AI bill scanning / review / posting ----
+@app.post("/bill-drafts/scan")
+def scan_bill_draft(
+    file: UploadFile = File(...),
+    session_id: str = Form("default"),
+    conn=Depends(get_conn),
+) -> dict:
+    """Image -> persistent AI bill draft. Never posts accounting side effects."""
+    content_type = (file.content_type or "").split(";")[0].lower()
+    image = file.file.read(billing_service.MAX_SCAN_BYTES + 1)
+    try:
+        return billing_service.scan_bill(
+            conn,
+            image_bytes=image,
+            filename=file.filename or "bill.jpg",
+            mime_type=content_type,
+            session_id=session_id,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(
+            status_code=502, detail=f"bill extraction failed: {exc}"
+        ) from exc
+
+
+@app.get("/bill-drafts")
+def list_bill_drafts(
+    session_id: str | None = None,
+    limit: int = 25,
+    conn=Depends(get_conn),
+) -> list[dict]:
+    return billing_repository.list_drafts(conn, session_id, limit)
+
+
+@app.get("/bill-drafts/{draft_id}")
+def get_bill_draft(draft_id: str, conn=Depends(get_conn)) -> dict:
+    try:
+        return billing_repository.get_draft(conn, draft_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@app.put("/bill-drafts/{draft_id}")
+def replace_bill_draft(
+    draft_id: str, body: BillDraftReplaceIn, conn=Depends(get_conn)
+) -> dict:
+    """Exact structured edits from the review screen."""
+    try:
+        return billing_service.replace_draft_data(conn, draft_id, body.data)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@app.post("/bill-drafts/{draft_id}/answer")
+def answer_bill_draft(
+    draft_id: str, body: BillDraftAnswerIn, conn=Depends(get_conn)
+) -> dict:
+    """Natural-language correction supplied through the AI chat."""
+    try:
+        return billing_service.answer_draft(conn, draft_id, body.answer)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(
+            status_code=502, detail=f"bill correction failed: {exc}"
+        ) from exc
+
+
+@app.post("/bill-drafts/{draft_id}/voice-answer")
+def voice_answer_bill_draft(
+    draft_id: str,
+    file: UploadFile = File(...),
+    conn=Depends(get_conn),
+) -> dict:
+    """Audio correction -> transcript -> update the persistent bill draft."""
+    if not config.has_voice():
+        raise HTTPException(status_code=503, detail="voice libraries not installed")
+    audio = file.file.read()
+    try:
+        names = [row["name"] for row in db.list_parties(conn)]
+        transcript = voice.transcribe(
+            audio,
+            file.filename or "audio.webm",
+            voice.build_hint(names),
+        )
+        draft = billing_service.answer_draft(
+            conn, draft_id, transcript["text"]
+        )
+        return {"transcript": transcript, "draft": draft}
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(
+            status_code=502, detail=f"voice correction failed: {exc}"
+        ) from exc
+
+
+@app.post("/bill-drafts/{draft_id}/confirm")
+def confirm_bill_draft(draft_id: str, conn=Depends(get_conn)) -> dict:
+    """Explicit confirmation: atomically post bill, stock, ledger, and cash."""
+    try:
+        return billing_repository.finalize_draft(conn, draft_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@app.get("/bills/summary")
+def get_bills_summary(conn=Depends(get_conn)) -> dict:
+    return billing_repository.bill_summary(conn)
+
+
+@app.get("/bills")
+def list_bills(
+    type: Literal["sale", "purchase"] | None = None,
+    limit: int = 100,
+    conn=Depends(get_conn),
+) -> list[dict]:
+    return billing_repository.list_bills(conn, type, limit)
+
+
+@app.get("/bills/{bill_id}")
+def get_bill(bill_id: int, conn=Depends(get_conn)) -> dict:
+    try:
+        return billing_repository.get_bill(conn, bill_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@app.get("/bills/{bill_id}/pdf")
+def download_bill_pdf(bill_id: int, conn=Depends(get_conn)) -> Response:
+    """Download a professional DukanBook-branded finalized bill."""
+    try:
+        bill = billing_repository.get_bill(conn, bill_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    content = billing_pdf.build_bill_pdf(bill)
+    safe_number = "".join(
+        character if character.isalnum() or character in "-_" else "_"
+        for character in bill["bill_number"]
+    )
+    return Response(
+        content=content,
+        media_type="application/pdf",
+        headers={
+            "Content-Disposition": (
+                f'attachment; filename="DukanBook-{safe_number}.pdf"'
+            )
+        },
+    )
+
+
+@app.get("/stock")
+def list_stock(conn=Depends(get_conn)) -> list[dict]:
+    return billing_repository.list_stock(conn)
+
+
+@app.get("/cashbook")
+def list_cashbook(limit: int = 100, conn=Depends(get_conn)) -> list[dict]:
+    return billing_repository.list_cashbook(conn, limit)
 
 
 # ---- Demo controls ----

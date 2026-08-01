@@ -25,6 +25,13 @@ shopkeeper does not have to learn complicated software to run their own accounts
 - Answers questions about GST, income tax, loans, licences, stock and general business, using
   a set of official reference notes so the information stays reliable.
 - Works by voice and by text, in Hindi, English and Hinglish, and speaks the reply back.
+- Scans handwritten sale and purchase bills inside the existing AI Assistant, asks for
+  unreadable or missing details by text or voice, and keeps a persistent draft during review.
+- Independently recalculates every item, subtotal, GST split and grand total using integer
+  paise; handwritten arithmetic mismatches must be resolved before confirmation.
+- Produces GST or non-GST DukanBook-branded digital bills and downloadable PDFs.
+- Posts a confirmed purchase or sale atomically to bills, stock, party ledger and cashbook.
+  Scanning and AI extraction alone never change the accounts.
 - When it is not sure about something, it says so instead of giving a wrong answer.
 
 ## How it is built
@@ -37,7 +44,8 @@ logic and is the only layer that touches the database, so there is a single sour
   share the same backend.
 - **Backend:** FastAPI (Python), which serves the API, the AI brain and tool-calling, the
   ledger and reminder logic, the knowledge engine and voice.
-- **Database:** SQLite, storing parties, transactions, reminders and the knowledge base.
+- **Database:** SQLite, storing parties, transactions, reminders, bill drafts, finalized bills,
+  products, stock movements, cashbook entries and the knowledge base.
 
 The assistant's intelligence runs on a local Ollama model, so no paid API key is needed.
 Business answers use Retrieval-Augmented Generation over prepared reference notes. Voice uses
@@ -50,6 +58,7 @@ faster-whisper for speech to text and edge-tts for the spoken reply, both key-fr
 | Backend | FastAPI + Uvicorn (Python) |
 | Database | SQLite |
 | Local LLM | Ollama (OpenAI-compatible), e.g. `qwen3:8b`; optional Gemini/Groq |
+| Bill vision | Gemini structured vision for accuracy; Ollama (`gemma3:4b`) fallback |
 | Knowledge (RAG) | fastembed (multilingual-e5-large) + NumPy cosine search |
 | Voice | faster-whisper (speech to text), edge-tts (text to speech) |
 | Web frontend | HTML, CSS, vanilla JavaScript |
@@ -84,6 +93,28 @@ This starts the backend and the screens together. The branded web app is availab
 `http://localhost:8000/app/`. The voice part runs on local libraries, so it needs no key. To
 turn on the smart assistant, run Ollama and set `OLLAMA_MODEL` in a `.env` file (a sample is
 in `.env.example`); a cloud key (`GEMINI_API_KEY` or `GROQ_API_KEY`) also works.
+
+The bill assistant defaults to the deterministic `fake` extractor so its full scan → review
+→ confirm workflow can be tested without a vision model. To read actual handwritten photos
+locally:
+
+```
+ollama pull gemma3:4b
+```
+
+Then set:
+
+```
+BILL_AI_BACKEND=gemini
+BILL_GEMINI_MODEL=gemini-3.6-flash
+```
+
+Open the existing AI Assistant and tap the camera button. The Bills tab is the history and
+management view; it does not create a separate chatbot.
+
+The extraction boundary is deliberately provider-neutral. For GCP production, the local
+Ollama adapter can be replaced with a Vertex AI/Document AI adapter while keeping the same
+canonical draft, deterministic calculator, confirmation rules and posting transaction.
 
 ## Deploying it
 
