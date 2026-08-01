@@ -47,14 +47,26 @@ const initials = (name) => (name || "?").trim().slice(0, 1).toUpperCase();
 const esc = (s) => (s || "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
 const linkify = (s) =>
   esc(s).replace(/(https?:\/\/[^\s]+|tel:\+?[0-9]+)/g, (u) => `<a href="${u}" target="_blank">${u.length > 34 ? "link" : u}</a>`);
-const chatIcon = (name) => ({
-  back: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15 18l-6-6 6-6"/></svg>',
-  camera: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h3l1.5-2h7L17 7h3v12H4z"/><circle cx="12" cy="13" r="3.5"/></svg>',
-  mic: '<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M6 11a6 6 0 0012 0M12 17v4M9 21h6"/></svg>',
-  stop: '<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="7" y="7" width="10" height="10" rx="2"/></svg>',
-  send: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5l16 7-16 7 3-7zM7 12h13"/></svg>',
-  shield: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3l7 3v5c0 4.8-2.8 8.2-7 10-4.2-1.8-7-5.2-7-10V6z"/><path d="M9 12l2 2 4-4"/></svg>',
-}[name] || "");
+const FA_ICONS = {
+  back: ["fa-solid", "fa-arrow-left"], camera: ["fa-solid", "fa-camera"],
+  mic: ["fa-solid", "fa-microphone-lines"], stop: ["fa-solid", "fa-stop"],
+  send: ["fa-solid", "fa-paper-plane"], shield: ["fa-solid", "fa-shield-halved"],
+  search: ["fa-solid", "fa-magnifying-glass"], phone: ["fa-solid", "fa-phone"],
+  whatsapp: ["fa-brands", "fa-whatsapp"], users: ["fa-solid", "fa-user-group"],
+  box: ["fa-solid", "fa-box"], warning: ["fa-solid", "fa-triangle-exclamation"],
+  envelope: ["fa-solid", "fa-envelope-open-text"], calculator: ["fa-solid", "fa-calculator"],
+  scan: ["fa-solid", "fa-file-circle-plus"], receipt: ["fa-solid", "fa-receipt"],
+  sale: ["fa-solid", "fa-arrow-up-from-bracket"], purchase: ["fa-solid", "fa-arrow-down"],
+  check: ["fa-solid", "fa-circle-check"], pen: ["fa-solid", "fa-pen-to-square"],
+  profile: ["fa-solid", "fa-user"], book: ["fa-solid", "fa-book-open"],
+  clock: ["fa-solid", "fa-clock"], trash: ["fa-solid", "fa-trash-can"],
+  card: ["fa-solid", "fa-address-card"], message: ["fa-solid", "fa-message"],
+  gst: ["fa-solid", "fa-indian-rupee-sign"], image: ["fa-solid", "fa-image"],
+};
+const chatIcon = (name) => {
+  const classes = FA_ICONS[name];
+  return classes ? `<i class="${classes.join(" ")}" aria-hidden="true"></i>` : "";
+};
 
 function toast(msg) {
   const t = $("#toast");
@@ -133,7 +145,7 @@ function renderHome() {
       <div class="col give"><div class="amt">${fmt(give)}</div><div class="lbl">You will give</div></div>
     </div>
     <div class="searchrow">
-      <div class="search"><span class="mag">🔍</span>
+      <div class="search"><span class="mag">${chatIcon("search")}</span>
         <input id="searchBox" placeholder="Search ${noun}" value="${esc(state.search)}" />
       </div>
       <button class="fab" id="addParty">+</button>
@@ -154,7 +166,7 @@ function rowHTML(p) {
   const bal = p.balance;
   const cls = bal > 0 ? "get" : bal < 0 ? "give" : "zero";
   const label = bal > 0 ? "you will get" : bal < 0 ? "you will give" : "settled";
-  const phone = p.phone ? " · 📞 " + p.phone : "";
+  const phone = p.phone ? ` · ${chatIcon("phone")} ${esc(p.phone)}` : "";
   return `<div class="row" data-pid="${p.id}">
       <div class="avatar">${initials(p.name)}</div>
       <div class="meta"><div class="nm">${esc(p.name)}</div>
@@ -163,7 +175,7 @@ function rowHTML(p) {
     </div>`;
 }
 function emptyHTML(noun) {
-  return `<div class="empty"><div class="em-ico">🧑‍🤝‍🧑</div>
+  return `<div class="empty"><div class="em-ico">${chatIcon("users")}</div>
     <div class="em-title">No ${noun} yet</div>
     <div class="em-sub">Tap the + button to add your first ${noun.toLowerCase().replace(/s$/, "")}.</div></div>`;
 }
@@ -179,13 +191,13 @@ async function openDetail(id) {
   const cls = bal > 0 ? "get" : bal < 0 ? "give" : "zero";
   const label = bal > 0 ? "You will get" : bal < 0 ? "You will give" : "Settled";
   const phoneBlock = p.phone
-    ? `<a class="chip" href="tel:+91${p.phone}">📞 Call ${p.phone}</a>
-       <a class="chip" href="https://wa.me/91${p.phone}" target="_blank">💬 WhatsApp</a>`
-    : `<button class="chip" id="addPhone">📞 Add phone</button>`;
+    ? `<a class="chip" href="tel:+91${p.phone}">${chatIcon("phone")} Call ${p.phone}</a>
+       <a class="chip" href="https://wa.me/91${p.phone}" target="_blank">${chatIcon("whatsapp")} WhatsApp</a>`
+    : `<button class="chip" id="addPhone">${chatIcon("phone")} Add phone</button>`;
 
   view().innerHTML = `
     <div class="detail-head">
-      <button class="back" id="back">←</button>
+      <button class="back" id="back" aria-label="Back">${chatIcon("back")}</button>
       <div class="avatar">${initials(p.name)}</div>
       <div><div class="nm" style="font-weight:700">${esc(p.name)}</div>
         <div class="sub" style="color:var(--muted);font-size:.78rem">${esc(p.type)}</div></div>
@@ -196,7 +208,7 @@ async function openDetail(id) {
       <button class="chip solid" id="getBtn">＋ You got (payment)</button>
     </div>
     <div class="chip-row">${phoneBlock}
-      <button class="chip" id="remindBtn">⏰ Set reminder</button>
+      <button class="chip" id="remindBtn">${chatIcon("clock")} Set reminder</button>
     </div>
     <div class="section-title">History</div>
     <div class="list">${d.transactions.length
@@ -233,11 +245,11 @@ async function renderStock() {
     </div>
     ${products.length ? `<div class="list">${products.map((p) => `
       <div class="row">
-        <div class="avatar">📦</div>
+        <div class="avatar">${chatIcon("box")}</div>
         <div class="meta"><div class="nm">${esc(p.name)}</div>
           <div class="sub">Updated by confirmed purchase/sale bills</div></div>
         <div class="bal ${Number(p.quantity) < 0 ? "give" : "get"}">${esc(String(p.quantity))} ${esc(p.unit || "")}</div>
-      </div>`).join("")}</div>` : `<div class="empty"><div class="em-ico">📦</div>
+      </div>`).join("")}</div>` : `<div class="empty"><div class="em-ico">${chatIcon("box")}</div>
       <div class="em-title">No products added</div>
       <div class="em-sub">Scan a purchase bill in the AI Assistant to add stock.</div></div>`}`;
 }
@@ -250,7 +262,7 @@ async function renderBills() {
     [summary, bills] = await Promise.all([getBillSummary(), getBills(state.billTab)]);
   } catch (error) {
     console.error("Bills load failed", error);
-    view().innerHTML = `<div class="empty"><div class="em-ico">⚠️</div>
+    view().innerHTML = `<div class="empty"><div class="em-ico">${chatIcon("warning")}</div>
       <div class="em-title">Bills could not be loaded</div>
       <div class="em-sub">Please check the connection and try again.</div></div>`;
     return;
@@ -260,7 +272,7 @@ async function renderBills() {
     <div class="bill-head">
       <div><div class="screen-title">Manage Bills</div>
         <div class="screen-sub">Created and verified with the DukanBook AI Assistant</div></div>
-      <button class="scan-cta" id="scanFromBills">📷 Scan bill</button>
+      <button class="scan-cta" id="scanFromBills">${chatIcon("scan")} Scan bill</button>
     </div>
     <div class="stats">
       <div class="col"><div class="n get">${fmtPaise(summary.total_sales_paise)}</div><div class="t">Total Sales</div></div>
@@ -276,7 +288,7 @@ async function renderBills() {
       <button class="${state.billTab === "purchase" ? "active" : ""}" data-btab="purchase">Purchases</button>
     </div>
     ${bills.length ? `<div class="list bill-list">${bills.map(billRowHTML).join("")}</div>` :
-      `<div class="empty bill-empty"><div class="em-ico">✉️</div>
+      `<div class="empty bill-empty"><div class="em-ico">${chatIcon("envelope")}</div>
         <div class="em-title">No ${tabLabel} Bills Added</div>
         <div class="em-sub">Open the AI Assistant and photograph a handwritten bill.</div>
         <button class="btn-primary compact" id="emptyScan">Scan with AI</button></div>`}`;
@@ -307,7 +319,7 @@ async function openBillDetail(id) {
   try {
     const bill = await api("/bills/" + id);
     view().innerHTML = `
-      <div class="detail-head"><button class="back" id="back">←</button>
+      <div class="detail-head"><button class="back" id="back" aria-label="Back">${chatIcon("back")}</button>
         <div><div class="screen-title">DukanBook ${bill.type === "sale" ? "Sale" : "Purchase"} Bill</div>
           <div class="screen-sub">${esc(bill.bill_number)}</div></div></div>
       <div class="digital-bill">
@@ -332,13 +344,13 @@ async function openCashbook() {
   view().innerHTML = `<div class="spinner"></div>`;
   let entries = [];
   try { entries = await api("/cashbook"); } catch {}
-  view().innerHTML = `<div class="detail-head"><button class="back" id="back">←</button>
+  view().innerHTML = `<div class="detail-head"><button class="back" id="back" aria-label="Back">${chatIcon("back")}</button>
       <div class="screen-title">Cashbook</div></div>
     ${entries.length ? `<div class="list">${entries.map((entry) => `
       <div class="txn"><div><div>${esc(entry.note || entry.bill_number || "Bill")}</div>
         <div class="d">${esc(entry.entry_date || "")}</div></div>
         <div class="a ${entry.direction === "in" ? "get" : "give"}">${entry.direction === "in" ? "+" : "−"}${fmtPaise(entry.amount_paise)}</div>
-      </div>`).join("")}</div>` : `<div class="empty"><div class="em-ico">🧮</div>
+      </div>`).join("")}</div>` : `<div class="empty"><div class="em-ico">${chatIcon("calculator")}</div>
       <div class="em-title">No cash entries</div><div class="em-sub">Paid bills appear here automatically.</div></div>`}`;
   $("#back").onclick = () => { state.nav = "bills"; renderBills(); };
 }
@@ -346,15 +358,15 @@ async function openCashbook() {
 /* ---------- MENU ---------- */
 function renderMenu() {
   const items = [
-    ["👤", "Profile"], ["📒", "Cashbook"], ["⏰", "Reminders / Call requests", () => openReminders()],
-    ["💬", "AI Assistant", () => openChat()], ["🗑️", "Bin"], ["📇", "Visiting Cards"],
-    ["📞", "Call Us"], ["✉️", "Mail Us"],
+    ["profile", "Profile"], ["book", "Cashbook"], ["clock", "Reminders / Call requests", () => openReminders()],
+    ["message", "AI Assistant", () => openChat()], ["trash", "Bin"], ["card", "Visiting Cards"],
+    ["phone", "Call Us"], ["envelope", "Mail Us"],
   ];
   view().innerHTML = `
     <div class="menu-head"><div class="mav"></div>
       <div><div class="mn">DukanBook</div><div class="me">Aapka digital khata</div></div></div>
     ${items.map((it, i) => `<div class="menu-item" data-mi="${i}">
-        <span class="mi">${it[0]}</span><span>${it[1]}</span></div>`).join("")}`;
+        <span class="mi">${chatIcon(it[0])}</span><span>${it[1]}</span></div>`).join("")}`;
   document.querySelectorAll("[data-mi]").forEach((el) => {
     const it = items[Number(el.dataset.mi)];
     el.onclick = it[2] || (() => toast(it[1] + " — coming soon"));
@@ -369,10 +381,10 @@ async function openReminders() {
   let rem = [];
   try { rem = await getReminders("pending"); } catch {}
   view().innerHTML = `
-    <div class="detail-head"><button class="back" id="back">←</button>
+    <div class="detail-head"><button class="back" id="back" aria-label="Back">${chatIcon("back")}</button>
       <div style="font-size:1.2rem;font-weight:700">Reminders & Call requests</div></div>
     <div class="list">${rem.length ? rem.map(remHTML).join("")
-      : `<div class="empty"><div class="em-ico">⏰</div><div class="em-title">No pending reminders</div>
+      : `<div class="empty"><div class="em-ico">${chatIcon("clock")}</div><div class="em-title">No pending reminders</div>
          <div class="em-sub">Ask the AI: "kal Rahul ko 500 ke liye call karna".</div></div>`}</div>`;
   $("#back").onclick = () => { state.nav = "menu"; render(); };
   document.querySelectorAll("[data-done]").forEach((b) =>
@@ -380,15 +392,15 @@ async function openReminders() {
 }
 function remHTML(r) {
   const amt = r.amount ? " · " + fmt(r.amount) : "";
-  const wa = r.whatsapp_link ? `<a class="chip" href="${r.whatsapp_link}" target="_blank">💬 WhatsApp</a>` : "";
-  const call = r.call_link ? `<a class="chip" href="${r.call_link}">📞 Call</a>` : "";
+  const wa = r.whatsapp_link ? `<a class="chip" href="${r.whatsapp_link}" target="_blank">${chatIcon("whatsapp")} WhatsApp</a>` : "";
+  const call = r.call_link ? `<a class="chip" href="${r.call_link}">${chatIcon("phone")} Call</a>` : "";
   return `<div style="border-bottom:1px solid var(--line);padding:10px 4px">
     <div style="display:flex;justify-content:space-between">
       <div><b>${esc(r.party_name)}</b>${amt}</div>
       <div class="d" style="font-size:.74rem;color:var(--muted)">${(r.due_at || "").replace("T", " ").slice(0, 16)}</div></div>
     ${r.message ? `<div class="sub" style="font-size:.82rem;color:var(--muted);margin:3px 0">${esc(r.message)}</div>` : ""}
     <div class="chip-row" style="margin-top:6px">${call}${wa}
-      <button class="chip" data-done="${r.id}">✓ Done</button></div></div>`;
+      <button class="chip" data-done="${r.id}">${chatIcon("check")} Done</button></div></div>`;
 }
 
 /* ---------- CHAT (the same AI Assistant handles khata + scanned bills) ---------- */
@@ -425,9 +437,9 @@ Khata update karein, reminder banayein, business sawal poochhein, ya handwritten
           </div>
         </div>
         <div class="quick-actions" id="quickActions" aria-label="Suggested actions">
-          <button type="button" data-chat-action="scan"><span>▣</span> Scan a bill</button>
-          <button type="button" data-suggest="Mere pending reminders dikhao"><span>◷</span> Check reminders</button>
-          <button type="button" data-suggest="GST registration kab zaroori hoti hai?"><span>₹</span> Ask about GST</button>
+          <button type="button" data-chat-action="scan"><span>${chatIcon("scan")}</span> Scan a bill</button>
+          <button type="button" data-suggest="Mere pending reminders dikhao"><span>${chatIcon("clock")}</span> Check reminders</button>
+          <button type="button" data-suggest="GST registration kab zaroori hoti hai?"><span>${chatIcon("gst")}</span> Ask about GST</button>
         </div>
       </div>
       <div class="composer-shell" id="composerShell">
@@ -548,7 +560,8 @@ function openBillScannerInChat() {
 }
 
 async function scanBillInChat(file) {
-  addBubble(`📷 ${file.name}`, "user");
+  const uploaded = addBubble(file.name, "user");
+  uploaded.innerHTML = `${chatIcon("image")} ${esc(file.name)}`;
   const typing = addBubble("Reading handwriting and extracting bill details…", "bot");
   const fd = new FormData();
   fd.append("file", file, file.name);
@@ -633,16 +646,16 @@ function appendDraftCard(draft) {
   const nextQuestion = (calc.missing_fields || []).length
     ? missingQuestion(calc.missing_fields[0]) : null;
   card.innerHTML = `
-    <div class="draft-card-top"><span>${data.bill_type === "purchase" ? "📥 Purchase" : data.bill_type === "sale" ? "📤 Sale" : "🧾 Bill draft"}</span>
+    <div class="draft-card-top"><span>${data.bill_type === "purchase" ? `${chatIcon("purchase")} Purchase` : data.bill_type === "sale" ? `${chatIcon("sale")} Sale` : `${chatIcon("receipt")} Bill draft`}</span>
       <b>${fmtPaise(calc.grand_total_paise)}</b></div>
     <div class="draft-card-party">${esc((data.party || {}).name || "Party not identified")} · ${(data.items || []).length} item(s)</div>
     <div class="draft-status ${draft.status === "ready_for_review" ? "ready" : ""}">
-      ${draft.status === "ready_for_review" ? "✓ Ready to review" :
+      ${draft.status === "ready_for_review" ? `${chatIcon("check")} Ready to review` :
         `${(calc.missing_fields || []).length} missing · ${errors.length} maths issue(s)`}</div>
     ${nextQuestion ? `<div class="draft-question"><b>AI asks:</b> ${esc(nextQuestion)}</div>` : ""}
     <div class="draft-actions">
-      ${nextQuestion ? `<button data-answer>🎙 Type or speak answer</button>` : ""}
-      <button data-review>${nextQuestion ? "✍ Fill details manually" : "Review & confirm"}</button>
+      ${nextQuestion ? `<button data-answer>${chatIcon("mic")} Type or speak answer</button>` : ""}
+      <button data-review>${nextQuestion ? `${chatIcon("pen")} Fill details manually` : `${chatIcon("check")} Review & confirm`}</button>
     </div>
     <button data-exit class="draft-exit">Exit bill</button>`;
   log.appendChild(card);
@@ -679,7 +692,7 @@ function openBillDraftEditor(draft) {
   const data = draft.data || {}, party = data.party || {}, calc = draft.calculation || {};
   const items = (data.items && data.items.length ? data.items : [{}]);
   const warningHTML = (calc.warnings || []).map((warning) =>
-    `<div class="math-warning ${warning.severity}">⚠ ${esc(warning.message)}</div>`).join("");
+    `<div class="math-warning ${warning.severity}">${chatIcon("warning")} ${esc(warning.message)}</div>`).join("");
   showModal(`<div class="bill-review">
     <div class="review-title"><div><h3>Review AI bill</h3>
       <div class="screen-sub">Nothing is posted until you confirm.</div></div>
@@ -832,33 +845,46 @@ function collectBillDraft(original) {
 }
 
 /* ---------- voice: normal assistant or active bill clarification ---------- */
-let _rec = null, _chunks = [], _recording = false;
+let _rec = null, _chunks = [], _recording = false, _recordingStartedAt = 0, _recordingTimer = null;
+function supportedRecordingOptions() {
+  const candidates = ["audio/webm;codecs=opus", "audio/webm", "audio/mp4"];
+  const mimeType = candidates.find((type) => MediaRecorder.isTypeSupported && MediaRecorder.isTypeSupported(type));
+  return mimeType ? { mimeType } : undefined;
+}
 async function toggleMic(btn) {
   if (_recording && _rec) { _rec.stop(); return; }
   if (!navigator.mediaDevices || !window.MediaRecorder) return toast("Browser mic supported nahi");
   try {
     const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-    _rec = new MediaRecorder(stream);
+    _rec = new MediaRecorder(stream, supportedRecordingOptions());
     _chunks = [];
     _rec.ondataavailable = (e) => { if (e.data.size) _chunks.push(e.data); };
     _rec.onstop = async () => {
       stream.getTracks().forEach((t) => t.stop());
+      clearTimeout(_recordingTimer);
+      const durationMs = Math.min(30_000, Math.max(0, Date.now() - _recordingStartedAt));
       _recording = false; btn.classList.remove("rec"); btn.innerHTML = chatIcon("mic");
-      await sendVoice(new Blob(_chunks, { type: _rec.mimeType || "audio/webm" }));
+      await sendVoice(new Blob(_chunks, { type: _rec.mimeType || "audio/webm" }), durationMs);
     };
     _rec.start();
+    _recordingStartedAt = Date.now();
+    _recordingTimer = setTimeout(() => {
+      if (_rec && _rec.state === "recording") _rec.stop();
+    }, 30_000);
     _recording = true; btn.classList.add("rec"); btn.innerHTML = chatIcon("stop");
     toast("Sun raha hoon… stop ke liye dobara tap karein");
   } catch { toast("Mic access nahi mila"); }
 }
-async function sendVoice(blob) {
-  const youSaid = addBubble("🎙️ …", "user");
+async function sendVoice(blob, durationMs = 0) {
+  const youSaid = addBubble("…", "user");
+  youSaid.innerHTML = `${chatIcon("mic")} …`;
   const botSaid = addBubble("…", "bot");
   activeResponseAbort = new AbortController();
   setStopResponseVisible(true);
   try {
     const fd = new FormData();
     fd.append("file", blob, "audio.webm");
+    fd.append("duration_ms", String(Math.round(durationMs)));
     if (!state.activeDraftId) fd.append("session_id", state.sessionId);
     const path = state.activeDraftId
       ? `/bill-drafts/${state.activeDraftId}/voice-answer`
@@ -868,7 +894,7 @@ async function sendVoice(blob) {
     const data = await res.json();
     const transcript = typeof data.transcript === "object"
       ? data.transcript.text : data.transcript;
-    youSaid.textContent = "🎙️ " + (transcript || "…");
+    youSaid.innerHTML = `${chatIcon("mic")} ${esc(transcript || "…")}`;
     if (state.activeDraftId) {
       const draft = data.draft;
       botSaid.textContent = billAssistantReply(draft);
@@ -972,7 +998,7 @@ function reminderModal(p) {
     <div class="field"><label>When</label><input id="due" type="datetime-local" value="${def}" /></div>
     <div class="field"><label>Amount ₹ (optional)</label><input id="rAmt" type="number" placeholder="0" /></div>
     <div class="field"><label>Channel</label>
-      <div class="seg" id="ch"><button class="on" data-c="call">📞 Call</button><button data-c="whatsapp">💬 WhatsApp</button></div></div>
+      <div class="seg" id="ch"><button class="on" data-c="call">${chatIcon("phone")} Call</button><button data-c="whatsapp">${chatIcon("whatsapp")} WhatsApp</button></div></div>
     <div class="field"><label>Note</label><input id="rMsg" placeholder="payment ke liye yaad dilao" /></div>
     <button class="btn-primary" id="saveRem">Set reminder</button>
     <button class="btn-ghost" id="cancel">Cancel</button>`);

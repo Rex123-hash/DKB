@@ -22,13 +22,13 @@ _BYE = {"bye", "byee", "goodbye", "alvida", "tata"}
 _OK = {"ok", "okay", "okie", "theek", "thik", "acha", "achha", "hmm", "hmmm"}
 
 _REPLY_GREET = (
-    "Namaste! 🙏 Main aapki dukaan ka hisaab rakhne mein madad karta hoon. "
+    "Namaste! Main aapki dukaan ka hisaab rakhne mein madad karta hoon. "
     "Aap bol ya likh sakte hain — jaise ‘Ramesh ko 500 udhaar likho’ ya ‘Ramesh kitna baaki hai’."
 )
-_REPLY_THANKS = "Koi baat nahi! 🙏 Aur kuch likhna ho to bataiye."
-_REPLY_BYE = "Theek hai, phir milte hain! 🙏"
+_REPLY_THANKS = "Koi baat nahi! Aur kuch likhna ho to bataiye."
+_REPLY_BYE = "Theek hai, phir milte hain!"
 _REPLY_OK = "👍 Bataiye, kya likhna hai?"
-_REPLY_HOWRU = "Main bilkul theek hoon, shukriya! 😊 Bataiye, aaj kaunsa hisaab likhna hai?"
+_REPLY_HOWRU = "Main bilkul theek hoon, shukriya! Bataiye, aaj kaunsa hisaab likhna hai?"
 _REPLY_WHO = (
     "Main Dukanbook ka AI munshi hoon. Aapka khaata (udhaar aur jama), balance, reminders, "
     "aur GST/tax/business sawaalon mein madad karta hoon — Hindi, English ya Hinglish mein."
@@ -95,7 +95,7 @@ def _is_collect(text: str) -> bool:
 
 def respond(message: str, lang: str = "auto", conn=None, session_id: str = "default") -> str:
     if not (message or "").strip():
-        return "Namaste! 🙏 Boliye ya likhiye — jaise ‘Ramesh ko 500 udhaar likho’ ya ‘Ramesh kitna baaki hai’."
+        return "Namaste! Boliye ya likhiye — jaise ‘Ramesh ko 500 udhaar likho’ ya ‘Ramesh kitna baaki hai’."
 
     own_conn = conn is None
     if own_conn:
@@ -167,7 +167,7 @@ def _start_create(intent, conn, session_id: str) -> str:
 
     if not created:
         joined = ", ".join(existing)
-        return f"“{joined}” ka khaata to pehle se hai 🙂."
+        return f"“{joined}” ka khaata to pehle se hai."
 
     queue = list(created)
     extra = ""
@@ -195,8 +195,8 @@ def _handle_set_phone(intent, conn) -> str:
     if res.get("error") == "not_found":
         return f"“{intent.party}” naam ka koi khaata nahi mila. Pehle khaata banaiye."
     if res.get("error") == "invalid_phone":
-        return f"Yeh number theek nahi laga 🤔. {intent.party} ka 10-digit mobile number bataiye."
-    return f"✅ {res['party']} ka phone number save ho gaya: {res['phone']}."
+        return f"Yeh number theek nahi laga. {intent.party} ka 10-digit mobile number bataiye."
+    return f"Ho gaya! {res['party']} ka phone number save ho gaya: {res['phone']}."
 
 
 def _begin_phone_capture(created: list[dict], session_id: str) -> str:
@@ -208,8 +208,8 @@ def _begin_phone_capture(created: list[dict], session_id: str) -> str:
 def _fmt_created(created: list[dict], existing: list[str]) -> str:
     names = ", ".join(c["name"] for c in created)
     n = len(created)
-    head = (f"✅ Naya khaata ban gaya: {names}." if n == 1
-            else f"✅ {n} naye khaate ban gaye: {names}.")
+    head = (f"Naya khaata ban gaya: {names}." if n == 1
+            else f"{n} naye khaate ban gaye: {names}.")
     if existing:
         head += f" ({', '.join(existing)} pehle se the.)"
     return head
@@ -222,7 +222,7 @@ def _advance(state: dict, session_id: str, prefix: str) -> str:
     if state["queue"]:
         return f"{prefix} {_ask_phone(state['queue'][0]['name'], nxt=True)}"
     _SESSIONS.pop(session_id, None)
-    return f"{prefix} ✅ Ho gaya! Saare khaate taiyaar hain."
+    return f"{prefix} Ho gaya! Saare khaate taiyaar hain."
 
 
 def _handle_phone_capture(state: dict, message: str, conn, session_id: str) -> str | None:
@@ -232,7 +232,7 @@ def _handle_phone_capture(state: dict, message: str, conn, session_id: str) -> s
     phone = tools.normalize_phone(message)
     if phone:
         tools.set_phone(conn, current["name"], message)
-        return _advance(state, session_id, f"✅ {current['name']} ka number save ho gaya.")
+        return _advance(state, session_id, f"{current['name']} ka number save ho gaya.")
 
     tokens = re.sub(r"[^\w\s]", " ", message.lower()).split()
     if any(t in _SKIP_WORDS for t in tokens):
@@ -246,7 +246,7 @@ def _handle_phone_capture(state: dict, message: str, conn, session_id: str) -> s
     if len(digits) >= 5 and len(letters) <= 2:
         if not state.get("retried"):
             state["retried"] = True
-            return (f"Yeh number theek nahi laga 🤔. {current['name']} ka 10-digit "
+            return (f"Yeh number theek nahi laga. {current['name']} ka 10-digit "
                     "mobile number dobara bataiye (ya ‘skip’).")
         return _advance(state, session_id, f"{current['name']} ka number samajh nahi aaya, abhi chhod diya.")
 
@@ -264,7 +264,7 @@ def _ask_purpose(r: dict) -> str:
     """Ask the reason for the call, confirming the number when we have it."""
     amt = f"₹{r['amount']:.0f} " if r.get("amount") else ""
     num = f" jinka number {r['phone']} hai" if r.get("phone") else ""
-    return f"{r['name']}{num}, unse {amt}maangne ka purpose kya hai? 🙂"
+    return f"{r['name']}{num}, unse {amt}maangne ka purpose kya hai?"
 
 
 def _start_collect(message: str, conn, session_id: str) -> str:
@@ -293,7 +293,7 @@ def _handle_reminder_dialog(state: dict, message: str, conn, session_id: str) ->
     r = state["reminder"]
     if message.strip().lower() in _CANCEL_PHRASES:
         _SESSIONS.pop(session_id, None)
-        return "Theek hai, reminder cancel kar diya. 🙏"
+        return "Theek hai, reminder cancel kar diya."
 
     if state["awaiting"] == "reminder_phone":
         phone = tools.normalize_phone(message)
@@ -306,7 +306,7 @@ def _handle_reminder_dialog(state: dict, message: str, conn, session_id: str) ->
         if any(t in _SKIP_WORDS for t in tokens):
             state["awaiting"] = "reminder_purpose"
             return _ask_purpose(r)
-        return f"Yeh number theek nahi laga 🤔. {r['name']} ka 10-digit mobile bataiye (ya ‘skip’)."
+        return f"Yeh number theek nahi laga. {r['name']} ka 10-digit mobile bataiye (ya ‘skip’)."
 
     if state["awaiting"] == "reminder_purpose":
         r["purpose"] = message.strip()
@@ -319,8 +319,8 @@ def _handle_reminder_dialog(state: dict, message: str, conn, session_id: str) ->
                             amount=r.get("amount"), channel="call")
     _SESSIONS.pop(session_id, None)
     when = _humanize_due(due)
-    return (f"Theek hai ✅, {r['name']} ko {when} par call kar diya jayega. "
-            f"Aapka jawab Reminders section me dikh jayega. Dhanyawaad 🙏")
+    return (f"Theek hai, {r['name']} ko {when} par call kar diya jayega. "
+            f"Aapka jawab Reminders section me dikh jayega. Dhanyawaad.")
 
 
 def _offline_respond(message: str, conn) -> str:
@@ -366,7 +366,7 @@ def _offline_respond(message: str, conn) -> str:
             )
 
     return (
-        "Samajh nahi aaya 🙏. Aap likh sakte hain: "
+        "Samajh nahi aaya. Aap likh sakte hain: "
         "‘Ramesh ko 500 udhaar likho’, ‘Suresh ne 200 jama kiye’, "
         "ya ‘Ramesh kitna baaki hai’."
     )
@@ -375,9 +375,9 @@ def _offline_respond(message: str, conn) -> str:
 def _fmt_add(res: dict) -> str:
     p, amt, bal = res["party"], res["amount"], res["balance"]
     if res["type"] == "credit":
-        head = f"✅ {p} ko ₹{amt:.0f} udhaar likh diya."
+        head = f"Ho gaya! {p} ko ₹{amt:.0f} udhaar likh diya."
     else:
-        head = f"✅ {p} se ₹{amt:.0f} jama kar liya."
+        head = f"Ho gaya! {p} se ₹{amt:.0f} jama kar liya."
     if bal > 0:
         tail = f"Ab {p} ke ₹{bal:.0f} baaki hain."
     elif bal == 0:
@@ -417,7 +417,7 @@ def _fmt_reminder(res: dict) -> str:
     when = _humanize_due(res.get("due_at"))
     amt = res.get("amount")
     amt_txt = f" ₹{amt:.0f} ke payment" if amt else ""
-    head = f"✅ {p} ko {when}{amt_txt} ke liye call reminder laga diya."
+    head = f"Ho gaya! {p} ko {when}{amt_txt} ke liye call reminder laga diya."
     if res.get("whatsapp_link"):
         head += " WhatsApp bhejne ka link Reminders page par hai 📲."
     elif res.get("phone") is None:

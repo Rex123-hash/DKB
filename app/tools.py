@@ -123,14 +123,14 @@ def call_link(phone: str | None) -> str | None:
 
 def _reminder_text(party_name: str, amount: float | None, message: str | None) -> str:
     """Default Hinglish WhatsApp follow-up text the shopkeeper can send."""
-    parts = [f"Namaste {party_name} ji 🙏,"]
+    parts = [f"Namaste {party_name} ji,"]
     if amount:
         parts.append(f"aapka ₹{amount:.0f} ka payment pending hai.")
     elif message:
         parts.append(message)
     else:
         parts.append("ek chhoti si yaad-dilani thi.")
-    parts.append("Kripya jaldi clear karein. Dhanyavaad 🙏")
+    parts.append("Kripya jaldi clear karein. Dhanyavaad.")
     return " ".join(parts)
 
 

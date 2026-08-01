@@ -25,7 +25,7 @@ def test_empty_message_gives_greeting():
 def test_ledger_message_is_processed_not_echoed(conn):
     out = brain.respond("Ramesh ko 500 udhaar likho", conn=conn)
     # it acts on the message rather than echoing it verbatim
-    assert "✅" in out
+    assert "Ho gaya" in out
     assert "500" in out
 
 
@@ -71,7 +71,7 @@ def test_escape_hatch_cancels_capture(conn):
     brain.respond("Ramesh ka khaata banao", conn=conn, session_id=s)
     # a clear ledger command during capture should be processed, not eaten
     out = brain.respond("Suresh ko 500 udhaar likho", conn=conn, session_id=s)
-    assert "✅" in out and "500" in out
+    assert "Ho gaya" in out and "500" in out
     assert s not in brain._SESSIONS
     assert db.find_party_by_name(conn, "Suresh") is not None
 

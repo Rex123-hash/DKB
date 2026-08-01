@@ -15,7 +15,7 @@ from datetime import datetime
 
 import requests
 
-from app import general, tools
+from app import config, general, tools
 
 GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions"
 OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://localhost:11434/v1/chat/completions")
@@ -265,6 +265,14 @@ def _providers() -> list[tuple]:
     gemini_key = os.environ.get("GEMINI_API_KEY")
     groq_key = os.environ.get("GROQ_API_KEY")
     chain: list[tuple] = []
+    if config.gcp_enabled():
+        # Lazy import is deliberate: with the private switch off, local startup
+        # never imports Google auth or asks for Application Default Credentials.
+        from app import gcp
+
+        chain.append(gcp.vertex_openai_provider())
+        if not config.GCP_ALLOW_LOCAL_FALLBACK:
+            return chain
     if ollama_model:
         chain.append((OLLAMA_URL, ollama_model, dict(json_hdr), OLLAMA_TIMEOUT))
         # Straight after the primary, before any cloud provider: if the chosen

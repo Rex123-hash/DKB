@@ -126,7 +126,11 @@ def chat(req: ChatRequest) -> ChatResponse:
 
 
 @app.post("/voice/chat")
-def voice_chat(file: UploadFile = File(...), session_id: str = Form("default")) -> dict:
+def voice_chat(
+    file: UploadFile = File(...),
+    session_id: str = Form("default"),
+    duration_ms: int = Form(0),
+) -> dict:
     """Audio in -> transcribe -> brain -> reply (+ TTS audio out).
 
     Sync route: FastAPI runs it in a worker thread, so the blocking Whisper call
@@ -144,7 +148,23 @@ def voice_chat(file: UploadFile = File(...), session_id: str = Form("default")) 
         names = []
     finally:
         conn.close()
-    stt = voice.transcribe(audio, file.filename or "audio.wav", voice.build_hint(names))
+    try:
+        transcribe_args = (
+            audio,
+            file.filename or "audio.wav",
+            voice.build_hint(names),
+        )
+        # Keep the original three-argument contract for existing callers that
+        # do not send duration metadata.
+        stt = (
+            voice.transcribe(*transcribe_args, duration_ms=duration_ms)
+            if duration_ms
+            else voice.transcribe(*transcribe_args)
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"voice transcription failed: {exc}") from exc
     reply = brain.respond(stt["text"], stt["lang"], session_id=session_id)
     audio_b64 = None
     try:
@@ -274,6 +294,7 @@ def answer_bill_draft(
 def voice_answer_bill_draft(
     draft_id: str,
     file: UploadFile = File(...),
+    duration_ms: int = Form(0),
     conn=Depends(get_conn),
 ) -> dict:
     """Audio correction -> transcript -> update the persistent bill draft."""
@@ -282,10 +303,15 @@ def voice_answer_bill_draft(
     audio = file.file.read()
     try:
         names = [row["name"] for row in db.list_parties(conn)]
-        transcript = voice.transcribe(
+        transcribe_args = (
             audio,
             file.filename or "audio.webm",
             voice.build_hint(names),
+        )
+        transcript = (
+            voice.transcribe(*transcribe_args, duration_ms=duration_ms)
+            if duration_ms
+            else voice.transcribe(*transcribe_args)
         )
         draft = billing_service.answer_draft(
             conn, draft_id, transcript["text"]
@@ -293,6 +319,8 @@ def voice_answer_bill_draft(
         return {"transcript": transcript, "draft": draft}
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     except Exception as exc:
         raise HTTPException(
             status_code=502, detail=f"voice correction failed: {exc}"

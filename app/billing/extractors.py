@@ -17,6 +17,7 @@ from typing import Protocol
 import requests
 from pydantic import BaseModel
 
+from app import config
 from app.billing.models import BillDraftData
 
 
@@ -455,6 +456,108 @@ class GeminiBillExtractor:
         )
 
 
+class VertexBillExtractor:
+    """GCP bill reader: optional Document AI OCR + Gemini vision on Vertex.
+
+    OCR is context only.  The original image remains authoritative and all
+    arithmetic stays in DukanBook's deterministic calculation layer.
+    """
+
+    name = "vertex"
+    version = "vertex-gemini-document-ai-v1"
+
+    def _request(
+        self,
+        prompt: str,
+        schema: dict,
+        *,
+        image_bytes: bytes | None = None,
+        mime_type: str | None = None,
+        ocr_text: str = "",
+    ) -> dict:
+        from app import gcp
+
+        full_prompt = prompt
+        if ocr_text:
+            full_prompt += (
+                "\n\nDocument AI OCR transcript follows. Treat it only as a reading "
+                "aid; prefer the image whenever they disagree and never invent a "
+                f"missing value.\n<ocr>\n{ocr_text[:30000]}\n</ocr>"
+            )
+        parts: list[dict] = [{"text": full_prompt}]
+        if image_bytes is not None:
+            parts.append(
+                {
+                    "inlineData": {
+                        "mimeType": mime_type or "image/jpeg",
+                        "data": base64.b64encode(image_bytes).decode("ascii"),
+                    }
+                }
+            )
+        return gcp.vertex_generate_content(
+            parts=parts,
+            response_schema=schema,
+            temperature=0,
+        )
+
+    def extract(
+        self, image_bytes: bytes, mime_type: str, filename: str
+    ) -> BillDraftData:
+        from app import gcp
+
+        try:
+            ocr_text = gcp.document_ai_ocr(image_bytes, mime_type)
+        except Exception:
+            # Document AI is optional enrichment; Gemini vision can still read
+            # the source image if no processor exists or OCR is unavailable.
+            ocr_text = ""
+        draft = BillDraftData.model_validate(
+            self._request(
+                f"{GEMINI_EXTRACTION_PROMPT}\n\nFilename: {filename}",
+                BillDraftData.model_json_schema(),
+                image_bytes=image_bytes,
+                mime_type=mime_type,
+                ocr_text=ocr_text,
+            )
+        )
+        if draft.document_kind == "bill" and not (draft.party.name or "").strip():
+            try:
+                header = BillHeaderRead.model_validate(
+                    self._request(
+                        HEADER_PROMPT,
+                        BillHeaderRead.model_json_schema(),
+                        image_bytes=image_bytes,
+                        mime_type=mime_type,
+                        ocr_text=ocr_text,
+                    )
+                )
+                if header.business_name.strip():
+                    draft.party.name = header.business_name.strip()
+                if not (draft.bill_number or "").strip() and header.bill_number.strip():
+                    draft.bill_number = header.bill_number.strip()
+                if not (draft.bill_date or "").strip():
+                    draft.bill_date = normalize_bill_date(
+                        header.bill_date or header.date_text
+                    )
+            except (requests.RequestException, ValueError):
+                pass
+        return remove_empty_items(draft)
+
+    def refine(self, draft: BillDraftData, answer: str) -> BillDraftData:
+        deterministic = apply_simple_answer(draft, answer)
+        if deterministic.model_dump() != draft.model_dump():
+            return deterministic
+        prompt = (
+            f"{REFINEMENT_PROMPT}\n\nCurrent draft:\n"
+            f"{draft.model_dump_json()}\n\nUser correction:\n{answer}"
+        )
+        return remove_empty_items(
+            BillDraftData.model_validate(
+                self._request(prompt, BillDraftData.model_json_schema())
+            )
+        )
+
+
 def _ollama_chat_url() -> str:
     explicit = os.environ.get("BILL_OLLAMA_URL")
     if explicit:
@@ -587,7 +690,12 @@ def apply_simple_answer(draft: BillDraftData, answer: str) -> BillDraftData:
 
 
 def get_extractor(backend: str | None = None) -> BillExtractor:
-    selected = (backend or os.environ.get("BILL_AI_BACKEND", "fake")).lower()
+    # An explicit backend argument is kept for tests and internal maintenance.
+    # Normal application traffic follows the private source-code switch.
+    selected = (
+        backend
+        or ("vertex" if config.gcp_enabled() else os.environ.get("BILL_AI_BACKEND", "fake"))
+    ).lower()
     if selected == "fake":
         return FakeBillExtractor()
     if selected == "ollama":
@@ -595,8 +703,5 @@ def get_extractor(backend: str | None = None) -> BillExtractor:
     if selected == "gemini":
         return GeminiBillExtractor()
     if selected == "vertex":
-        raise RuntimeError(
-            "Vertex bill extraction is reserved for the GCP adapter; "
-            "use BILL_AI_BACKEND=fake, ollama, or gemini locally."
-        )
+        return VertexBillExtractor()
     raise ValueError(f"unknown BILL_AI_BACKEND {selected!r}")

@@ -19,6 +19,8 @@ import os
 import re
 import tempfile
 
+from app import config
+
 WHISPER_MODEL = os.environ.get("WHISPER_MODEL", "small")  # tiny|base|small|medium
 
 GROQ_STT_URL = "https://api.groq.com/openai/v1/audio/transcriptions"
@@ -148,15 +150,62 @@ def _groq_transcribe(audio_bytes: bytes, filename: str, hint: str = "") -> dict:
     }
 
 
-def transcribe(audio_bytes: bytes, filename: str = "audio.wav", hint: str = "") -> dict:
-    """Speech bytes -> {'text', 'lang'}.
+def _gcp_transcribe(audio_bytes: bytes, hint: str = "") -> dict:
+    """Speech bytes -> text through Speech-to-Text V2 Chirp 3."""
+    from google.api_core.client_options import ClientOptions
+    from google.cloud.speech_v2 import SpeechClient
+    from google.cloud.speech_v2.types import cloud_speech
 
-    `hint` is expected vocabulary (party names, ledger words). Both backends use
-    it to bias decoding, which markedly improves names and Hinglish phrasing.
-    """
+    from app import gcp
+
+    location = os.environ.get("GCP_STT_LOCATION", "global").strip() or "global"
+    client_options = None
+    if location != "global":
+        client_options = ClientOptions(api_endpoint=f"{location}-speech.googleapis.com")
+    client = SpeechClient(client_options=client_options)
+    language_codes = [
+        code.strip()
+        for code in os.environ.get("GCP_STT_LANGUAGE_CODES", "hi-IN,en-IN").split(",")
+        if code.strip()
+    ]
+    features = None
+    if hint:
+        features = cloud_speech.RecognitionFeatures(
+            custom_prompt_config=cloud_speech.CustomPromptConfig(
+                custom_prompt=hint[:4000]
+            )
+        )
+    recognition_config = cloud_speech.RecognitionConfig(
+        auto_decoding_config=cloud_speech.AutoDetectDecodingConfig(),
+        language_codes=language_codes or ["auto"],
+        model=os.environ.get("GCP_STT_MODEL", "chirp_3"),
+        features=features,
+    )
+    response = client.recognize(
+        request=cloud_speech.RecognizeRequest(
+            recognizer=(
+                f"projects/{gcp.project_id()}/locations/{location}/recognizers/_"
+            ),
+            config=recognition_config,
+            content=audio_bytes,
+        )
+    )
+    texts: list[str] = []
+    detected = "unknown"
+    for result in response.results:
+        if result.alternatives:
+            texts.append(result.alternatives[0].transcript)
+        if getattr(result, "language_code", None):
+            detected = result.language_code
+    return {"text": " ".join(texts).strip(), "lang": _norm_lang(detected)}
+
+
+def _local_transcribe(audio_bytes: bytes, filename: str, hint: str = "") -> dict:
+    """The original local/Groq route, kept intact behind the private switch."""
     if _use_groq():
         return _groq_transcribe(audio_bytes, filename, hint)
-    with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
+    suffix = os.path.splitext(filename or "audio.wav")[1] or ".wav"
+    with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as f:
         f.write(audio_bytes)
         path = f.name
     try:
@@ -171,6 +220,70 @@ def transcribe(audio_bytes: bytes, filename: str = "audio.wav", hint: str = "") 
         return {"text": text, "lang": _norm_lang(getattr(info, "language", None))}
     finally:
         os.remove(path)
+
+
+def transcribe(
+    audio_bytes: bytes,
+    filename: str = "audio.wav",
+    hint: str = "",
+    duration_ms: int = 0,
+) -> dict:
+    """Speech bytes -> {'text', 'lang'}.
+
+    `hint` is expected vocabulary (party names, ledger words). Both backends use
+    it to bias decoding, which markedly improves names and Hinglish phrasing.
+    """
+    max_bytes = int(os.environ.get("VOICE_MAX_AUDIO_BYTES", str(10 * 1024 * 1024)))
+    if not audio_bytes:
+        raise ValueError("empty audio recording")
+    if len(audio_bytes) > max_bytes:
+        raise ValueError("audio recording is too large")
+    if duration_ms and duration_ms > 32_000:
+        raise ValueError("audio recording must be 30 seconds or shorter")
+    if config.gcp_enabled():
+        try:
+            return _gcp_transcribe(audio_bytes, hint)
+        except Exception:
+            if not config.GCP_ALLOW_LOCAL_FALLBACK:
+                raise
+    return _local_transcribe(audio_bytes, filename, hint)
+
+
+def _gcp_synthesize(text: str, lang: str) -> bytes:
+    """Text -> MP3 through a natural Indian Chirp 3 HD voice."""
+    from google.api_core.client_options import ClientOptions
+    from google.cloud import texttospeech
+
+    location = os.environ.get("GCP_TTS_LOCATION", "global").strip() or "global"
+    client_options = None
+    if location != "global":
+        client_options = ClientOptions(
+            api_endpoint=f"{location}-texttospeech.googleapis.com"
+        )
+    client = texttospeech.TextToSpeechClient(client_options=client_options)
+    base_lang = (lang or "hi").split("-")[0].lower()
+    language_code = "en-IN" if base_lang == "en" else "hi-IN"
+    default_voice = (
+        "en-IN-Chirp3-HD-Aoede" if base_lang == "en" else "hi-IN-Chirp3-HD-Aoede"
+    )
+    voice_name = os.environ.get(
+        "GCP_TTS_VOICE_EN" if base_lang == "en" else "GCP_TTS_VOICE_HI",
+        default_voice,
+    )
+    response = client.synthesize_speech(
+        request={
+            "input": texttospeech.SynthesisInput(text=text),
+            "voice": texttospeech.VoiceSelectionParams(
+                language_code=language_code,
+                name=voice_name,
+            ),
+            "audio_config": texttospeech.AudioConfig(
+                audio_encoding=texttospeech.AudioEncoding.MP3,
+                speaking_rate=float(os.environ.get("GCP_TTS_SPEAKING_RATE", "1.0")),
+            ),
+        }
+    )
+    return bytes(response.audio_content)
 
 
 async def _edge_synth(text: str, voice: str) -> bytes:
@@ -214,4 +327,10 @@ def synthesize(text: str, lang: str = "hi") -> bytes:
     text = speakable(text)
     if not text:
         return b""
+    if config.gcp_enabled():
+        try:
+            return _gcp_synthesize(text, lang)
+        except Exception:
+            if not config.GCP_ALLOW_LOCAL_FALLBACK:
+                raise
     return asyncio.run(_edge_synth(text, _voice_for(lang)))

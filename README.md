@@ -105,16 +105,47 @@ ollama pull gemma3:4b
 Then set:
 
 ```
-BILL_AI_BACKEND=gemini
-BILL_GEMINI_MODEL=gemini-3.6-flash
+BILL_AI_BACKEND=ollama
+BILL_OLLAMA_MODEL=gemma3:4b
 ```
 
 Open the existing AI Assistant and tap the camera button. The Bills tab is the history and
 management view; it does not create a separate chatbot.
 
-The extraction boundary is deliberately provider-neutral. For GCP production, the local
-Ollama adapter can be replaced with a Vertex AI/Document AI adapter while keeping the same
-canonical draft, deterministic calculator, confirmation rules and posting transaction.
+The extraction boundary is deliberately provider-neutral. The implemented GCP adapter keeps
+the same canonical draft, deterministic calculator, confirmation rules and posting transaction.
+
+### Private Google Cloud mode
+
+Google Cloud cannot be enabled from the browser or any API. The repository owner must edit the
+private constant in `app/config.py`, changing `GCP_ENABLED = False` to `True`, and restart the
+server. Changing it back to `False` restores the existing local provider order without changing
+the database or bill workflow. `GCP_ALLOW_LOCAL_FALLBACK` is a second code-only policy switch.
+
+GCP mode uses:
+
+- Vertex AI Gemini for the existing assistant's tool-calling loop.
+- Vertex AI Gemini vision for structured bill extraction, optionally enriched by a Document AI
+  OCR processor. The original scan remains authoritative and calculations remain deterministic.
+- Speech-to-Text V2 Chirp 3 for Hindi, Indian English and Hinglish input.
+- Text-to-Speech Chirp 3 HD for the spoken Indian voice.
+
+Enable the required APIs and authenticate locally with Application Default Credentials:
+
+```
+gcloud services enable aiplatform.googleapis.com speech.googleapis.com texttospeech.googleapis.com
+gcloud auth application-default login
+```
+
+Document AI is optional:
+
+```
+gcloud services enable documentai.googleapis.com
+```
+
+Set `GOOGLE_CLOUD_PROJECT` and the optional `GCP_*` model, region, voice and processor values
+shown in `.env.example`. No API key or service-account JSON is read by the GCP adapter. On Cloud
+Run, attach a least-privilege service account and let ADC obtain its short-lived identity.
 
 ### RAG retrieval evaluation
 

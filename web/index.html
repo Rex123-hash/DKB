@@ -4,9 +4,11 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
   <title>DukanBook</title>
+  <link rel="icon" type="image/svg+xml" href="favicon.svg" />
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link href="https://fonts.googleapis.com/css2?family=Poppins:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
-  <link rel="stylesheet" href="styles.css?v=production-chat-20260802-5" />
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@fortawesome/fontawesome-free@6.7.2/css/all.min.css" />
+  <link rel="stylesheet" href="styles.css?v=gcp-demo-20260802-1" />
 </head>
 <body>
   <div class="device">
@@ -17,11 +19,11 @@
         <div class="appbar-row">
           <div class="brand">DukanBook</div>
           <div class="appbar-icons">
-            <button class="icon-btn" id="navChat" title="AI Assistant">💬</button>
+            <button class="icon-btn" id="navChat" title="AI Assistant" aria-label="AI Assistant"><i class="fa-solid fa-message" aria-hidden="true"></i></button>
             <button class="icon-btn bell" id="navReminders" title="Reminders">
-              🔔<span class="badge" id="remBadge">0</span>
+              <i class="fa-solid fa-bell" aria-hidden="true"></i><span class="badge" id="remBadge">0</span>
             </button>
-            <button class="icon-btn" id="navTxns" title="Transactions">🧾</button>
+            <button class="icon-btn" id="navTxns" title="Transactions" aria-label="Transactions"><i class="fa-solid fa-receipt" aria-hidden="true"></i></button>
           </div>
         </div>
         <nav class="tabs" id="tabs">
@@ -39,19 +41,19 @@
           <path d="M0,26 L0,10 Q70,10 100,10 Q150,10 175,2 Q200,-6 225,2 Q250,10 300,10 Q330,10 400,10 L400,26 Z"></path>
         </svg>
         <button class="bn-item" data-nav="home">
-          <span class="bn-ico">🏠</span><span class="bn-lbl">Home</span>
+          <span class="bn-ico"><i class="fa-solid fa-house" aria-hidden="true"></i></span><span class="bn-lbl">Home</span>
         </button>
         <button class="bn-item" data-nav="stock">
-          <span class="bn-ico">📦</span><span class="bn-lbl">Stock</span>
+          <span class="bn-ico"><i class="fa-solid fa-box" aria-hidden="true"></i></span><span class="bn-lbl">Stock</span>
         </button>
         <button class="bn-ai" id="navAI" title="AI Assistant">
-          <span class="bn-ai-ico">🤖</span><span class="bn-ai-lbl">Assistant</span>
+          <span class="bn-ai-ico"><i class="fa-solid fa-robot" aria-hidden="true"></i></span><span class="bn-ai-lbl">Assistant</span>
         </button>
         <button class="bn-item" data-nav="bills">
-          <span class="bn-ico">🧾</span><span class="bn-lbl">Bills</span>
+          <span class="bn-ico"><i class="fa-solid fa-receipt" aria-hidden="true"></i></span><span class="bn-lbl">Bills</span>
         </button>
         <button class="bn-item" data-nav="menu">
-          <span class="bn-ico">☰</span><span class="bn-lbl">Menu</span>
+          <span class="bn-ico"><i class="fa-solid fa-bars" aria-hidden="true"></i></span><span class="bn-lbl">Menu</span>
         </button>
       </nav>
 
@@ -67,6 +69,6 @@
   <!-- ============ TOAST ============ -->
   <div class="toast hidden" id="toast"></div>
 
-  <script src="app.js?v=production-chat-20260802-5"></script>
+  <script src="app.js?v=gcp-demo-20260802-1"></script>
 </body>
 </html>

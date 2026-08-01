@@ -10,4 +10,8 @@ fastembed
 numpy
 faster-whisper
 edge-tts
+google-auth
+google-cloud-speech
+google-cloud-texttospeech
+google-cloud-documentai
 pytest
