@@ -28,8 +28,8 @@ async function api(path, opts) {
 const getParties = () => api("/parties");
 const getDetail = (id) => api("/parties/" + id);
 const getReminders = (s = "pending") => api("/reminders?status=" + s);
-const postJSON = (path, body) =>
-  api(path, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+const postJSON = (path, body, options = {}) =>
+  api(path, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body), ...options });
 const putJSON = (path, body) =>
   api(path, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
 const getBills = (type) => api("/bills" + (type ? "?type=" + encodeURIComponent(type) : ""));
@@ -47,12 +47,42 @@ const initials = (name) => (name || "?").trim().slice(0, 1).toUpperCase();
 const esc = (s) => (s || "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
 const linkify = (s) =>
   esc(s).replace(/(https?:\/\/[^\s]+|tel:\+?[0-9]+)/g, (u) => `<a href="${u}" target="_blank">${u.length > 34 ? "link" : u}</a>`);
+const chatIcon = (name) => ({
+  back: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15 18l-6-6 6-6"/></svg>',
+  camera: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h3l1.5-2h7L17 7h3v12H4z"/><circle cx="12" cy="13" r="3.5"/></svg>',
+  mic: '<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M6 11a6 6 0 0012 0M12 17v4M9 21h6"/></svg>',
+  stop: '<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="7" y="7" width="10" height="10" rx="2"/></svg>',
+  send: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5l16 7-16 7 3-7zM7 12h13"/></svg>',
+  shield: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3l7 3v5c0 4.8-2.8 8.2-7 10-4.2-1.8-7-5.2-7-10V6z"/><path d="M9 12l2 2 4-4"/></svg>',
+}[name] || "");
 
 function toast(msg) {
   const t = $("#toast");
   t.textContent = msg; t.classList.remove("hidden");
   clearTimeout(toast._t);
   toast._t = setTimeout(() => t.classList.add("hidden"), 2200);
+}
+
+let activeResponseAbort = null;
+let activeResponseAudio = null;
+const wasAborted = (error) => !!error && (
+  error.name === "AbortError" || error.code === 20 || /abort|cancel/i.test(error.message || "")
+);
+function setStopResponseVisible(visible) {
+  const stop = $("#stopResponseBtn");
+  const safe = $("#privateIndicator");
+  if (stop) stop.classList.toggle("hidden", !visible);
+  if (safe) safe.classList.toggle("hidden", visible);
+}
+function stopActiveAIResponse() {
+  if (activeResponseAbort) activeResponseAbort.abort();
+  if (activeResponseAudio) {
+    activeResponseAudio.pause();
+    activeResponseAudio.currentTime = 0;
+    activeResponseAudio = null;
+    addBubble("Voice response stopped. Aap sawaal ko correct karke dobara pooch sakte hain.", "bot");
+  }
+  setStopResponseVisible(false);
 }
 
 /* ---------- data load ---------- */
@@ -78,6 +108,7 @@ function setActive(name) {
 
 /* ---------- render router ---------- */
 function render() {
+  view().classList.remove("chat-screen");
   setActive(state.nav);
   // tabs only relevant on home
   $("#tabs").style.display = state.nav === "home" ? "flex" : "none";
@@ -332,6 +363,7 @@ function renderMenu() {
 
 /* ---------- REMINDERS ---------- */
 async function openReminders() {
+  view().classList.remove("chat-screen");
   $("#tabs").style.display = "none";
   view().innerHTML = `<div class="spinner"></div>`;
   let rem = [];
@@ -362,50 +394,116 @@ function remHTML(r) {
 /* ---------- CHAT (the same AI Assistant handles khata + scanned bills) ---------- */
 async function openChat() {
   $("#tabs").style.display = "none";
+  view().classList.add("chat-screen");
   setActive("ai");
   const micBtn = state.voice
-    ? `<button id="micBtn" class="mic" title="Boliye (Hindi / English / Hinglish)">🎙️</button>` : "";
+    ? `<button id="micBtn" class="composer-tool" type="button" aria-label="Speak your message" title="Speak in Hindi, English or Hinglish">${chatIcon("mic")}</button>` : "";
   view().innerHTML = `
     <div class="chat-wrap">
-      <div class="detail-head"><button class="back" id="back">←</button>
-        <div style="font-size:1.15rem;font-weight:700">🤖 AI Assistant</div></div>
-      <div class="chat-log" id="log">
-        <div class="bubble bot">Namaste! Main aapka DukanBook AI Assistant hoon.
-Khata update karein, reminder banayein, ya 📷 se handwritten bill scan karein. Main missing details poochunga aur confirmation ke baad hi stock/accounts update honge.</div>
+      <header class="chat-head">
+        <button class="chat-back" id="back" type="button" aria-label="Back to menu">${chatIcon("back")}</button>
+        <div class="assistant-avatar" aria-hidden="true"><span>AI</span></div>
+        <div class="assistant-identity">
+          <div class="assistant-name">DukanBook Assistant</div>
+          <div class="assistant-status"><span></span> Online · Hindi, English & Hinglish</div>
+        </div>
+        <div class="private-chip" id="privateIndicator" title="Bills are posted only after your confirmation">
+          ${chatIcon("shield")}<span>Safe</span>
+        </div>
+        <button class="stop-response hidden" id="stopResponseBtn" type="button" aria-label="Stop AI response">
+          ${chatIcon("stop")}<span>Stop</span>
+        </button>
+      </header>
+      <div class="chat-log" id="log" role="log" aria-live="polite" aria-label="Conversation with DukanBook Assistant">
+        <div class="chat-date"><span>Today</span></div>
+        <div class="message-row bot">
+          <div class="message-avatar" aria-hidden="true">AI</div>
+          <div class="message-content">
+            <div class="bubble bot"><b>Namaste! Main aapka DukanBook AI hoon.</b>
+Khata update karein, reminder banayein, business sawal poochhein, ya handwritten bill scan karein. Main details verify karke confirmation ke baad hi accounts aur stock update karunga.</div>
+            <div class="message-meta">DukanBook AI · now</div>
+          </div>
+        </div>
+        <div class="quick-actions" id="quickActions" aria-label="Suggested actions">
+          <button type="button" data-chat-action="scan"><span>▣</span> Scan a bill</button>
+          <button type="button" data-suggest="Mere pending reminders dikhao"><span>◷</span> Check reminders</button>
+          <button type="button" data-suggest="GST registration kab zaroori hoti hai?"><span>₹</span> Ask about GST</button>
+        </div>
       </div>
-      <div class="chat-input">
+      <div class="composer-shell" id="composerShell">
+        <div class="composer-note">${chatIcon("shield")} Nothing is posted without your confirmation</div>
+        <div class="chat-input">
+        <button id="cameraBtn" class="composer-tool" type="button" aria-label="Scan a handwritten bill" title="Scan handwritten bill">${chatIcon("camera")}</button>
         ${micBtn}
-        <button id="cameraBtn" class="mic" title="Handwritten bill scan karein">📷</button>
         <input id="billImage" class="hidden" type="file" accept="image/jpeg,image/png,image/webp" capture="environment" />
-        <input id="chatBox" placeholder="Message..." />
-        <button id="sendBtn">Send</button>
+        <input id="chatBox" aria-label="Message DukanBook Assistant" autocomplete="off" placeholder="Ask or enter bill details..." />
+        <button id="sendBtn" class="send-button" type="button" aria-label="Send message" disabled>${chatIcon("send")}</button>
+        </div>
       </div>
     </div>`;
   $("#back").onclick = () => { state.nav = "menu"; render(); };
+  $("#stopResponseBtn").onclick = stopActiveAIResponse;
+  let sending = false;
+  const syncComposer = () => {
+    const hasMessage = !!$("#chatBox").value.trim();
+    $("#sendBtn").disabled = sending || !hasMessage;
+    $("#composerShell").classList.toggle("has-text", hasMessage);
+  };
   const send = async () => {
-    const box = $("#chatBox"); const msg = box.value.trim(); if (!msg) return;
+    const box = $("#chatBox"); const msg = box.value.trim();
+    if (!msg || sending) return;
+    sending = true; syncComposer();
+    $("#composerShell").classList.add("busy");
+    $("#log").setAttribute("aria-busy", "true");
+    activeResponseAbort = new AbortController();
+    setStopResponseVisible(true);
     addBubble(msg, "user"); box.value = ""; box.focus();
+    syncComposer();
     const typing = addBubble("…", "bot");
+    typing.classList.add("typing");
     try {
       if (state.activeDraftId) {
         if (/^(cancel|exit|stop).*(bill)?$/i.test(msg)) {
           clearActiveDraft();
           typing.textContent = "Bill mode closed. The draft is still saved in Bills history for later review.";
         } else {
-          const draft = await postJSON(`/bill-drafts/${state.activeDraftId}/answer`, { answer: msg });
+          const draft = await postJSON(`/bill-drafts/${state.activeDraftId}/answer`, { answer: msg }, { signal: activeResponseAbort.signal });
           typing.textContent = billAssistantReply(draft);
           appendDraftCard(draft);
         }
       } else {
-        const r = await postJSON("/chat", { message: msg, session_id: state.sessionId });
+        const r = await postJSON("/chat", { message: msg, session_id: state.sessionId }, { signal: activeResponseAbort.signal });
         typing.innerHTML = linkify(r.reply);
       }
-    } catch { typing.textContent = "Backend se baat nahi ho payi."; }
+    } catch (error) {
+      typing.textContent = wasAborted(error)
+        ? "Response stopped. Aap mujhe correct karke dobara pooch sakte hain."
+        : "Backend se baat nahi ho payi. Please try again.";
+    }
+    finally {
+      typing.classList.remove("typing");
+      activeResponseAbort = null;
+      if (!activeResponseAudio) setStopResponseVisible(false);
+      sending = false;
+      $("#composerShell").classList.remove("busy");
+      $("#log").setAttribute("aria-busy", "false");
+      syncComposer();
+    }
     $("#log").scrollTop = $("#log").scrollHeight;
     loadData();  // ledger may have changed — refresh data but stay in chat
   };
   $("#sendBtn").onclick = send;
+  ["input", "change", "keyup"].forEach((eventName) =>
+    $("#chatBox").addEventListener(eventName, syncComposer));
   $("#chatBox").addEventListener("keydown", (e) => { if (e.key === "Enter") send(); });
+  document.querySelectorAll("[data-suggest]").forEach((button) => {
+    button.onclick = () => {
+      $("#chatBox").value = button.dataset.suggest;
+      syncComposer();
+      $("#chatBox").focus();
+    };
+  });
+  $("[data-chat-action='scan']").onclick = () => $("#billImage").click();
   if (state.voice) $("#micBtn").onclick = (e) => toggleMic(e.currentTarget);
   $("#cameraBtn").onclick = () => $("#billImage").click();
   $("#billImage").onchange = (e) => {
@@ -421,9 +519,24 @@ Khata update karein, reminder banayein, ya 📷 se handwritten bill scan karein.
   }
 }
 function addBubble(text, who) {
+  const row = document.createElement("div");
+  row.className = "message-row " + who;
+  if (who === "bot") {
+    const avatar = document.createElement("div");
+    avatar.className = "message-avatar";
+    avatar.setAttribute("aria-hidden", "true");
+    avatar.textContent = "AI";
+    row.appendChild(avatar);
+  }
+  const content = document.createElement("div");
+  content.className = "message-content";
   const b = document.createElement("div");
   b.className = "bubble " + who; b.textContent = text;
-  $("#log").appendChild(b); $("#log").scrollTop = $("#log").scrollHeight;
+  const meta = document.createElement("div");
+  meta.className = "message-meta";
+  meta.textContent = who === "bot" ? "DukanBook AI · now" : "You · now";
+  content.appendChild(b); content.appendChild(meta); row.appendChild(content);
+  $("#log").appendChild(row); $("#log").scrollTop = $("#log").scrollHeight;
   return b;
 }
 
@@ -730,17 +843,19 @@ async function toggleMic(btn) {
     _rec.ondataavailable = (e) => { if (e.data.size) _chunks.push(e.data); };
     _rec.onstop = async () => {
       stream.getTracks().forEach((t) => t.stop());
-      _recording = false; btn.classList.remove("rec"); btn.textContent = "🎙️";
+      _recording = false; btn.classList.remove("rec"); btn.innerHTML = chatIcon("mic");
       await sendVoice(new Blob(_chunks, { type: _rec.mimeType || "audio/webm" }));
     };
     _rec.start();
-    _recording = true; btn.classList.add("rec"); btn.textContent = "⏹";
+    _recording = true; btn.classList.add("rec"); btn.innerHTML = chatIcon("stop");
     toast("Sun raha hoon… stop ke liye dobara tap karein");
   } catch { toast("Mic access nahi mila"); }
 }
 async function sendVoice(blob) {
   const youSaid = addBubble("🎙️ …", "user");
   const botSaid = addBubble("…", "bot");
+  activeResponseAbort = new AbortController();
+  setStopResponseVisible(true);
   try {
     const fd = new FormData();
     fd.append("file", blob, "audio.webm");
@@ -748,7 +863,7 @@ async function sendVoice(blob) {
     const path = state.activeDraftId
       ? `/bill-drafts/${state.activeDraftId}/voice-answer`
       : "/voice/chat";
-    const res = await fetch(path, { method: "POST", body: fd });
+    const res = await fetch(path, { method: "POST", body: fd, signal: activeResponseAbort.signal });
     if (!res.ok) throw new Error(await res.text());
     const data = await res.json();
     const transcript = typeof data.transcript === "object"
@@ -760,10 +875,26 @@ async function sendVoice(blob) {
       appendDraftCard(draft);
     } else {
       botSaid.innerHTML = linkify(data.reply || "");
-      if (data.audio_b64) { try { new Audio("data:audio/mp3;base64," + data.audio_b64).play(); } catch {} }
+      if (data.audio_b64) {
+        try {
+          activeResponseAudio = new Audio("data:audio/mp3;base64," + data.audio_b64);
+          activeResponseAudio.onended = () => {
+            activeResponseAudio = null;
+            setStopResponseVisible(false);
+          };
+          await activeResponseAudio.play();
+        } catch {
+          activeResponseAudio = null;
+        }
+      }
     }
   } catch (e) {
-    botSaid.textContent = "Voice error — phir se boliye.";
+    botSaid.textContent = wasAborted(e)
+      ? "Voice response stopped."
+      : "Voice error — phir se boliye.";
+  } finally {
+    activeResponseAbort = null;
+    if (!activeResponseAudio) setStopResponseVisible(false);
   }
   $("#log").scrollTop = $("#log").scrollHeight;
   loadData();  // stay in chat
