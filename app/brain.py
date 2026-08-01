@@ -27,7 +27,7 @@ _REPLY_GREET = (
 )
 _REPLY_THANKS = "Koi baat nahi! Aur kuch likhna ho to bataiye."
 _REPLY_BYE = "Theek hai, phir milte hain!"
-_REPLY_OK = "👍 Bataiye, kya likhna hai?"
+_REPLY_OK = "Bataiye, kya likhna hai?"
 _REPLY_HOWRU = "Main bilkul theek hoon, shukriya! Bataiye, aaj kaunsa hisaab likhna hai?"
 _REPLY_WHO = (
     "Main Dukanbook ka AI munshi hoon. Aapka khaata (udhaar aur jama), balance, reminders, "
@@ -397,7 +397,7 @@ def _fmt_balance(res: dict) -> str:
 
 
 def _fmt_list(rows: list[dict]) -> str:
-    lines = ["📒 Aapke khaate:"]
+    lines = ["Aapke khaate:"]
     for r in rows:
         lines.append(f"• {r['name']} ({r['type']}): ₹{r['balance']:.0f}")
     return "\n".join(lines)
@@ -419,7 +419,7 @@ def _fmt_reminder(res: dict) -> str:
     amt_txt = f" ₹{amt:.0f} ke payment" if amt else ""
     head = f"Ho gaya! {p} ko {when}{amt_txt} ke liye call reminder laga diya."
     if res.get("whatsapp_link"):
-        head += " WhatsApp bhejne ka link Reminders page par hai 📲."
+        head += " WhatsApp bhejne ka link Reminders page par hai."
     elif res.get("phone") is None:
         head += f" ({p} ka phone number add karein WhatsApp ke liye.)"
     return head
