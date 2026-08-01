@@ -1,63 +1,132 @@
-# -*- coding: utf-8 -*-
-"""Honest retrieval evaluation for the Dukanbook RAG pipeline.
+"""Deterministic evaluation harness for DukanBook's retrieval pipeline."""
+from __future__ import annotations
 
-For each test question we know which knowledge file SHOULD answer it. We run the
-real retrieval and check whether a correct-topic file appears in the top results.
-Reports Hit@1, Hit@3, Hit@5 and MRR (mean reciprocal rank).
-"""
+import argparse
+import json
+import sys
+from pathlib import Path
+
+from app import config as _config  # noqa: F401 - loads the project's .env
 from app import db, rag
 
-# (question, set of acceptable source files for that topic)
-TESTS = [
-    ("GST registration kab zaroori hoti hai?", {"gst_basics.md", "faq_gst.md"}),
-    ("GST ke kitne tax slab hote hain?", {"gst_advanced.md", "faq_gst.md", "gst_basics.md"}),
-    ("e-way bill kab banana padta hai?", {"gst_advanced.md", "faq_gst.md"}),
-    ("composition scheme kya hai?", {"gst_basics.md", "gst_advanced.md", "faq_gst.md", "glossary.md"}),
-    ("income tax return file karne ka fayda?", {"income_tax_basics.md", "faq_income_tax.md"}),
-    ("44AD presumptive scheme kya hai?", {"income_tax_basics.md", "income_tax_advanced.md", "faq_income_tax.md"}),
-    ("TDS kya hota hai?", {"income_tax_advanced.md", "faq_income_tax.md"}),
-    ("udhaar kaise vasoolein customers se?", {"credit_udhaar_management.md", "business_tips.md", "faq_shop_operations.md"}),
-    ("customer ko kitna credit limit dena chahiye?", {"credit_udhaar_management.md", "business_tips.md"}),
-    ("MUDRA loan ke kitne type hain?", {"loans_and_schemes.md", "faq_loans_schemes.md"}),
-    ("PM SVANidhi yojana kya hai?", {"loans_and_schemes.md", "faq_loans_schemes.md"}),
-    ("CIBIL score kitna hona chahiye?", {"loans_and_schemes.md", "faq_loans_schemes.md", "glossary.md"}),
-    ("FSSAI license kis ko chahiye?", {"licenses_compliance.md", "faq_licenses.md"}),
-    ("Gumasta license kya hota hai?", {"licenses_compliance.md", "faq_licenses.md"}),
-    ("stock turnover ka matlab kya hai?", {"inventory_management.md", "faq_shop_operations.md", "glossary.md"}),
-    ("dead stock ka kya karein?", {"inventory_management.md", "faq_shop_operations.md"}),
-    ("UPI QR code se kya fayda hota hai?", {"payments_banking.md", "faq_payments.md"}),
-    ("ONDC par online kaise bechein?", {"online_selling.md"}),
-    ("Diwali ke liye stock kaise plan karein?", {"festival_calendar.md", "inventory_management.md", "business_tips.md"}),
-    ("proprietorship aur partnership me farak?", {"business_structure.md"}),
-]
+DATASET_PATH = Path("data/evals/retrieval_eval.json")
 
 
-def main():
-    conn = db.get_connection()
-    n = len(TESTS)
-    h1 = h3 = h5 = 0
-    mrr = 0.0
-    print(f"Knowledge base: {rag.count(conn)} chunks\n")
-    print(f"{'Q#':<3}{'Hit?':<6}{'Rank':<6}{'Top file':<30}Question")
-    print("-" * 92)
-    for i, (q, exp) in enumerate(TESTS, 1):
-        res = rag.search(conn, q, k=5)
-        srcs = [r["source"] for r in res]
-        rank = next((j + 1 for j, s in enumerate(srcs) if s in exp), None)
+def load_dataset(path: Path = DATASET_PATH) -> list[dict]:
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def ensure_kb(conn) -> int:
+    db.init_db(conn)
+    existing = rag.count(conn)
+    if existing:
+        return existing
+    try:
+        loaded = rag.load_kb(conn)
+        return loaded or rag.ingest(conn)
+    except ModuleNotFoundError as exc:
+        raise SystemExit(
+            "Knowledge base is empty and embedding dependencies are missing. "
+            "Install project requirements, then rerun this evaluation."
+        ) from exc
+
+
+def run_eval(
+    conn, dataset: list[dict], top_k: int = 5
+) -> tuple[list[dict], dict]:
+    rows = []
+    hit1 = hit3 = hit5 = 0
+    reciprocal_rank = precision3 = recall5 = groundedness = 0.0
+
+    for item in dataset:
+        query = item["question"]
+        expected = set(item["expected_sources"])
+        hits = rag.search(conn, query, k=top_k)
+        # Evaluate source documents, not repeated chunks from the same document.
+        # Hybrid retrieval may legitimately return several sections of one file.
+        sources = list(dict.fromkeys(hit["source"] for hit in hits))
+        rank = next(
+            (index + 1 for index, source in enumerate(sources) if source in expected),
+            None,
+        )
+        relevant_top3 = sum(source in expected for source in sources[:3])
+        relevant_top5 = sum(source in expected for source in sources[:5])
+        answer = rag.grounded_answer(query, hits) or ""
+        support = rag.supported_sentence_ratio(answer, hits)
+
         if rank:
-            mrr += 1.0 / rank
-            h1 += rank <= 1
-            h3 += rank <= 3
-            h5 += rank <= 5
-        mark = "yes" if rank else "MISS"
-        print(f"{i:<3}{mark:<6}{str(rank or '-'):<6}{srcs[0]:<30}{q[:34]}")
-    print("-" * 92)
-    print(f"\nQuestions tested : {n}")
-    print(f"Hit@1            : {h1}/{n} = {h1/n:.0%}")
-    print(f"Hit@3            : {h3}/{n} = {h3/n:.0%}")
-    print(f"Hit@5            : {h5}/{n} = {h5/n:.0%}")
-    print(f"MRR              : {mrr/n:.3f}")
+            reciprocal_rank += 1.0 / rank
+            hit1 += rank <= 1
+            hit3 += rank <= 3
+            hit5 += rank <= 5
+        precision3 += relevant_top3 / min(3, max(len(sources), 1))
+        recall5 += relevant_top5 / len(expected)
+        groundedness += support
+        rows.append(
+            {
+                "question": query,
+                "expected_sources": sorted(expected),
+                "top_sources": sources,
+                "rank": rank,
+                "answer": answer,
+                "supported_sentence_ratio": support,
+            }
+        )
+
+    total = max(len(dataset), 1)
+    metrics = {
+        "questions": len(dataset),
+        "hit_at_1": hit1 / total,
+        "hit_at_3": hit3 / total,
+        "hit_at_5": hit5 / total,
+        "mrr": reciprocal_rank / total,
+        "precision_at_3": precision3 / total,
+        "recall_at_5": recall5 / total,
+        "grounded_sentence_ratio": groundedness / total,
+    }
+    return rows, metrics
+
+
+def print_report(rows: list[dict], metrics: dict) -> None:
+    print(f"Knowledge eval questions: {metrics['questions']}")
+    print(f"Hit@1: {metrics['hit_at_1']:.0%}")
+    print(f"Hit@3: {metrics['hit_at_3']:.0%}")
+    print(f"Hit@5: {metrics['hit_at_5']:.0%}")
+    print(f"MRR: {metrics['mrr']:.3f}")
+    print(f"Precision@3: {metrics['precision_at_3']:.3f}")
+    print(f"Recall@5: {metrics['recall_at_5']:.3f}")
+    print(f"Grounded sentence ratio: {metrics['grounded_sentence_ratio']:.3f}")
+    print()
+    print(f"{'Rank':<6}{'Top source':<30}Question")
+    print("-" * 96)
+    for row in rows:
+        top = row["top_sources"][0] if row["top_sources"] else "-"
+        print(f"{str(row['rank'] or '-'): <6}{top:<30}{row['question']}")
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--min-hit-at-3", type=float, default=None)
+    args = parser.parse_args(argv)
+
+    conn = db.get_connection()
+    try:
+        chunk_count = ensure_kb(conn)
+        rows, metrics = run_eval(conn, load_dataset())
+    finally:
+        conn.close()
+
+    print(f"Knowledge base chunks: {chunk_count}")
+    print_report(rows, metrics)
+    if args.min_hit_at_3 is not None and metrics["hit_at_3"] < args.min_hit_at_3:
+        print(
+            f"\nRegression check failed: Hit@3 {metrics['hit_at_3']:.3f} "
+            f"< {args.min_hit_at_3:.3f}",
+            file=sys.stderr,
+        )
+        return 1
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

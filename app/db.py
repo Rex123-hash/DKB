@@ -59,7 +59,22 @@ CREATE TABLE IF NOT EXISTS kb_chunk (
     id        INTEGER PRIMARY KEY AUTOINCREMENT,
     text      TEXT NOT NULL,
     source    TEXT,
+    title     TEXT,
+    section   TEXT,
+    line_from INTEGER,
+    line_to   INTEGER,
+    chunk_key TEXT,
     embedding BLOB
+);
+
+CREATE TABLE IF NOT EXISTS trace_event (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id       TEXT NOT NULL,
+    event_type   TEXT NOT NULL,
+    question     TEXT,
+    payload_json TEXT NOT NULL,
+    latency_ms   REAL,
+    created_at   TEXT NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS bill_draft (
@@ -200,13 +215,60 @@ _REMINDER_MIGRATIONS = [
     ("created_at", "created_at TEXT"),
 ]
 
+_KB_CHUNK_MIGRATIONS = [
+    ("title", "title TEXT"),
+    ("section", "section TEXT"),
+    ("line_from", "line_from INTEGER"),
+    ("line_to", "line_to INTEGER"),
+    ("chunk_key", "chunk_key TEXT"),
+]
+
+
+def _ensure_columns(
+    conn: sqlite3.Connection, table: str, migrations: list[tuple[str, str]]
+) -> None:
+    have = {row["name"] for row in conn.execute(f"PRAGMA table_info({table})")}
+    for column, ddl in migrations:
+        if column not in have:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {ddl}")
+
+
+def _ensure_fts(conn: sqlite3.Connection) -> None:
+    """Create and synchronize the optional SQLite full-text index."""
+    try:
+        conn.execute(
+            """
+            CREATE VIRTUAL TABLE IF NOT EXISTS kb_chunk_fts USING fts5(
+                text,
+                title,
+                section,
+                source,
+                tokenize = 'unicode61'
+            )
+            """
+        )
+        kb_count = conn.execute("SELECT COUNT(*) FROM kb_chunk").fetchone()[0]
+        fts_count = conn.execute("SELECT COUNT(*) FROM kb_chunk_fts").fetchone()[0]
+        if kb_count != fts_count:
+            conn.execute("DELETE FROM kb_chunk_fts")
+            conn.execute(
+                """
+                INSERT INTO kb_chunk_fts(rowid, text, title, section, source)
+                SELECT id, text, COALESCE(title, ''), COALESCE(section, ''),
+                       COALESCE(source, '')
+                FROM kb_chunk
+                """
+            )
+    except sqlite3.OperationalError:
+        # Some minimal SQLite builds omit FTS5. Dense retrieval remains usable.
+        pass
+
 
 def _migrate(conn: sqlite3.Connection) -> None:
-    """Idempotently add new reminder columns to a pre-existing database."""
-    have = {row["name"] for row in conn.execute("PRAGMA table_info(reminder)")}
-    for col, ddl in _REMINDER_MIGRATIONS:
-        if col not in have:
-            conn.execute(f"ALTER TABLE reminder ADD COLUMN {ddl}")
+    """Idempotently upgrade pre-existing operational and RAG tables."""
+    _ensure_columns(conn, "reminder", _REMINDER_MIGRATIONS)
+    _ensure_columns(conn, "kb_chunk", _KB_CHUNK_MIGRATIONS)
+    _ensure_fts(conn)
     conn.commit()
 
 
@@ -215,6 +277,64 @@ def init_db(conn: sqlite3.Connection) -> None:
     conn.executescript(SCHEMA)
     _migrate(conn)
     conn.commit()
+
+
+def has_fts(conn: sqlite3.Connection) -> bool:
+    row = conn.execute(
+        "SELECT name FROM sqlite_master "
+        "WHERE type = 'table' AND name = 'kb_chunk_fts'"
+    ).fetchone()
+    return row is not None
+
+
+def replace_kb_fts(conn: sqlite3.Connection) -> None:
+    """Synchronize FTS rows after a knowledge-base ingest or cache load."""
+    if not has_fts(conn):
+        return
+    conn.execute("DELETE FROM kb_chunk_fts")
+    conn.execute(
+        """
+        INSERT INTO kb_chunk_fts(rowid, text, title, section, source)
+        SELECT id, text, COALESCE(title, ''), COALESCE(section, ''),
+               COALESCE(source, '')
+        FROM kb_chunk
+        """
+    )
+    conn.commit()
+
+
+def log_trace(
+    conn: sqlite3.Connection,
+    run_id: str,
+    event_type: str,
+    payload_json: str,
+    question: str | None = None,
+    latency_ms: float | None = None,
+) -> int:
+    """Persist a compact retrieval/agent trace for evaluation and debugging."""
+    cur = conn.execute(
+        """
+        INSERT INTO trace_event (
+            run_id, event_type, question, payload_json, latency_ms, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?)
+        """,
+        (run_id, event_type, question, payload_json, latency_ms, _now()),
+    )
+    conn.commit()
+    return int(cur.lastrowid)
+
+
+def list_traces(conn: sqlite3.Connection, limit: int = 25):
+    return conn.execute(
+        """
+        SELECT id, run_id, event_type, question, payload_json, latency_ms,
+               created_at
+        FROM trace_event
+        ORDER BY id DESC
+        LIMIT ?
+        """,
+        (max(1, min(int(limit), 500)),),
+    ).fetchall()
 
 
 def add_party(conn: sqlite3.Connection, name: str, type: str, phone: str | None = None) -> int:

@@ -35,11 +35,28 @@ def test_ingest_counts_chunks(tmp_path):
     assert rag.count(conn) == 3
 
 
+def test_ingest_stores_section_and_line_metadata(tmp_path):
+    conn = _kb(tmp_path)
+    rag.ingest(conn, tmp_path, embedder=fake_embed)
+
+    row = conn.execute(
+        "SELECT title, section, line_from, line_to, chunk_key "
+        "FROM kb_chunk ORDER BY id LIMIT 1"
+    ).fetchone()
+
+    assert row["title"]
+    assert row["section"]
+    assert row["line_from"] >= 1
+    assert row["line_to"] >= row["line_from"]
+    assert row["chunk_key"]
+
+
 def test_search_ranks_gst(tmp_path):
     conn = _kb(tmp_path)
     rag.ingest(conn, tmp_path, embedder=fake_embed)
     res = rag.search(conn, "gst registration", k=1, embedder=fake_embed)
     assert res and "GST" in res[0]["text"]
+    assert res[0]["citation"].startswith("[a.md")
 
 
 def test_search_ranks_dues(tmp_path):
@@ -53,3 +70,44 @@ def test_search_empty_kb_returns_nothing():
     conn = db.get_connection(":memory:")
     db.init_db(conn)
     assert rag.search(conn, "anything", embedder=fake_embed) == []
+
+
+def test_hinglish_query_rewrite_and_grounded_answer(tmp_path):
+    conn = _kb(tmp_path)
+    rag.ingest(conn, tmp_path, embedder=fake_embed)
+
+    hits = rag.search(conn, "udhaar kaise recover karein", k=2, embedder=fake_embed)
+    answer = rag.grounded_answer("udhaar kaise recover karein", hits)
+
+    assert hits and hits[0]["source"] == "b.md"
+    assert answer is not None
+    assert "[b.md" in answer
+    assert rag.supported_sentence_ratio(answer, hits) > 0
+
+
+def test_vector_cache_roundtrip_preserves_rag_metadata(tmp_path):
+    conn = _kb(tmp_path)
+    rag.ingest(conn, tmp_path, embedder=fake_embed)
+    cache_path = tmp_path / "kb.npz"
+
+    assert rag.export_kb(conn, cache_path) == 3
+    conn.execute("DELETE FROM kb_chunk")
+    conn.commit()
+    assert rag.load_kb(conn, cache_path) == 3
+
+    row = conn.execute(
+        "SELECT title, section, chunk_key FROM kb_chunk ORDER BY id LIMIT 1"
+    ).fetchone()
+    assert row["title"] and row["section"] and row["chunk_key"]
+
+
+def test_retrieval_writes_an_auditable_trace(tmp_path):
+    conn = _kb(tmp_path)
+    rag.ingest(conn, tmp_path, embedder=fake_embed)
+
+    rag.search(conn, "gst registration", k=1, embedder=fake_embed, run_id="run-1")
+    trace = db.list_traces(conn, limit=1)[0]
+
+    assert trace["run_id"] == "run-1"
+    assert trace["event_type"] == "retrieval"
+    assert "gst registration" in trace["payload_json"]

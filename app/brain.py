@@ -355,9 +355,15 @@ def _offline_respond(message: str, conn) -> str:
 
     # Not a ledger intent: try a knowledge-base lookup (only if a KB is loaded).
     if rag.count(conn) > 0:
-        hits = rag.search(conn, message, k=1)
-        if hits and hits[0]["score"] > 0.35:
-            return hits[0]["text"]
+        hits = rag.search(conn, message, k=3)
+        answer = rag.grounded_answer(message, hits)
+        if answer:
+            return answer
+        if hits:
+            return (
+                "Mujhe is sawal par apne notes mein poori pakki jankari nahi "
+                f"mili. Sabse kareeb note: {hits[0]['citation']}"
+            )
 
     return (
         "Samajh nahi aaya 🙏. Aap likh sakte hain: "

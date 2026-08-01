@@ -18,7 +18,17 @@ def test_init_creates_tables():
             "SELECT name FROM sqlite_master WHERE type='table'"
         ).fetchall()
     }
-    assert {"party", "transaction", "reminder", "kb_chunk"} <= names
+    assert {"party", "transaction", "reminder", "kb_chunk", "trace_event"} <= names
+
+
+def test_rag_schema_has_metadata_and_optional_fts():
+    conn = _fresh()
+    columns = {row["name"] for row in conn.execute("PRAGMA table_info(kb_chunk)")}
+    assert {"title", "section", "line_from", "line_to", "chunk_key"} <= columns
+    if db.has_fts(conn):
+        assert conn.execute(
+            "SELECT name FROM sqlite_master WHERE name = 'kb_chunk_fts'"
+        ).fetchone()
 
 
 def test_balance_credit_minus_debit():

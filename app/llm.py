@@ -49,7 +49,9 @@ SYSTEM_PROMPT = (
     "the tool result's 'balance' field. Do not mention a balance for non-ledger actions. "
     "For GST, tax, loan, licence, invoice, stock or business questions, ALWAYS call "
     "search_knowledge first and answer ONLY from the returned passages that match the "
-    "question; if nothing matches, say you are not sure (never invent tax/GST rules). "
+    "question. Cite the supporting note inline using the citation text already present "
+    "in the tool result; if nothing matches, say you are not sure (never invent tax/GST "
+    "rules). "
     "A question like 'what is X' / 'X kya hai' is a knowledge question; never treat a "
     "question word as a name. "
     "For a reminder or call request use schedule_reminder with an ISO 8601 due_at from "
@@ -139,7 +141,8 @@ TOOL_SCHEMAS = [
             "description": (
                 "Search the accounting/GST/tax and business-advice knowledge base. "
                 "Use for any question about GST, income tax, invoices, bookkeeping, "
-                "or shopkeeper business advice. Returns reference passages."
+                "or shopkeeper business advice. Returns hybrid-ranked passages with "
+                "section and line citations."
             ),
             "parameters": {
                 "type": "object",

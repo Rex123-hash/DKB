@@ -116,6 +116,16 @@ The extraction boundary is deliberately provider-neutral. For GCP production, th
 Ollama adapter can be replaced with a Vertex AI/Document AI adapter while keeping the same
 canonical draft, deterministic calculator, confirmation rules and posting transaction.
 
+### RAG retrieval evaluation
+
+The business-knowledge assistant uses section-aware chunks, dense and lexical retrieval,
+reciprocal-rank fusion, lightweight reranking, inline source citations and retrieval traces.
+Run the committed Hinglish/English regression set with:
+
+```
+uv run --no-project --python .venv/Scripts/python.exe python eval_rag.py --min-hit-at-3 0.8
+```
+
 ## Deploying it
 
 The app ships as a container (`Dockerfile`), with `render.yaml` describing a Render

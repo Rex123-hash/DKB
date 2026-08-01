@@ -1,0 +1,62 @@
+[
+  {
+    "question": "GST registration kab zaroori hoti hai?",
+    "expected_sources": ["gst_basics.md", "faq_gst.md"],
+    "required_terms": ["registration", "threshold"]
+  },
+  {
+    "question": "Composition scheme kya hai?",
+    "expected_sources": ["gst_basics.md", "gst_advanced.md", "faq_gst.md", "glossary.md"],
+    "required_terms": ["composition"]
+  },
+  {
+    "question": "e-way bill kab banana padta hai?",
+    "expected_sources": ["gst_advanced.md", "faq_gst.md"],
+    "required_terms": ["e-way"]
+  },
+  {
+    "question": "Income tax return file karne ka fayda kya hai?",
+    "expected_sources": ["income_tax_basics.md", "faq_income_tax.md"],
+    "required_terms": ["return", "tax"]
+  },
+  {
+    "question": "44AD presumptive scheme kya hoti hai?",
+    "expected_sources": ["income_tax_basics.md", "income_tax_advanced.md", "faq_income_tax.md"],
+    "required_terms": ["44ad", "presumptive"]
+  },
+  {
+    "question": "Udhaar ke paise customers se kaise vasool karein?",
+    "expected_sources": ["credit_udhaar_management.md", "business_tips.md", "faq_shop_operations.md"],
+    "required_terms": ["udhaar", "customer"]
+  },
+  {
+    "question": "Customer ko kitna credit limit dena chahiye?",
+    "expected_sources": ["credit_udhaar_management.md", "business_tips.md"],
+    "required_terms": ["credit", "limit"]
+  },
+  {
+    "question": "MUDRA loan ke kitne type hote hain?",
+    "expected_sources": ["loans_and_schemes.md", "faq_loans_schemes.md"],
+    "required_terms": ["mudra", "loan"]
+  },
+  {
+    "question": "FSSAI license kis ko chahiye?",
+    "expected_sources": ["licenses_compliance.md", "faq_licenses.md"],
+    "required_terms": ["fssai", "license"]
+  },
+  {
+    "question": "Stock turnover ka matlab kya hai?",
+    "expected_sources": ["inventory_management.md", "faq_shop_operations.md", "glossary.md"],
+    "required_terms": ["stock", "turnover"]
+  },
+  {
+    "question": "UPI QR code se kya fayda hota hai?",
+    "expected_sources": ["payments_banking.md", "faq_payments.md"],
+    "required_terms": ["upi", "qr"]
+  },
+  {
+    "question": "Diwali ke liye stock kaise plan karein?",
+    "expected_sources": ["festival_calendar.md", "inventory_management.md", "business_tips.md"],
+    "required_terms": ["diwali", "stock"]
+  }
+]
