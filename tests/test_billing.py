@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import hashlib
+from datetime import date
 import re
 
 import pytest
@@ -446,3 +447,218 @@ def test_none_answer_removes_phantom_items_instead_of_looping():
     assert not any(
         path.startswith("items.") for path in updated["calculation"]["missing_fields"]
     )
+
+
+def test_one_message_with_every_detail_is_applied_at_once():
+    """A shopkeeper who says everything once must not be asked again."""
+    draft = FakeBillExtractor().refine(
+        BillDraftData(document_kind="bill"),
+        "purchase bill from Verma Traders, date 2026-01-03, non-GST, cash paid",
+    )
+    assert draft.bill_type == "purchase"
+    assert draft.party.name == "Verma Traders"
+    assert draft.bill_date == "2026-01-03"
+    assert draft.gst_mode == "non_gst"
+    assert draft.payment_status == "paid"
+
+
+def test_multi_detail_answer_does_not_swallow_the_sentence_as_a_party_name():
+    draft = FakeBillExtractor().refine(
+        BillDraftData(document_kind="bill"), "sale bill, 18% GST, IGST, udhaar"
+    )
+    assert draft.bill_type == "sale"
+    assert draft.gst_mode == "gst"
+    assert draft.gst_rate == "18"
+    assert draft.tax_scheme == "igst"
+    assert draft.payment_status == "credit"
+    assert draft.party.name is None
+
+
+def test_refiner_never_overwrites_a_value_already_on_the_draft():
+    draft = FakeBillExtractor().refine(
+        _draft(party={"name": "Ramesh"}), "sale to Suresh"
+    )
+    assert draft.party.name == "Ramesh"
+
+
+def test_indian_numeric_date_in_a_sentence_is_understood():
+    draft = FakeBillExtractor().refine(
+        BillDraftData(document_kind="bill"), "purchase, 03/01/2026, paid"
+    )
+    assert draft.bill_date == "2026-01-03"
+
+
+def test_ledger_entry_is_dated_on_the_bill_date_not_today():
+    conn = _conn()
+    data = _draft(bill_type="sale", payment_status="credit", bill_date="2026-01-05")
+    repository.finalize_draft(conn, _saved_draft(conn, data))
+    txn_date = conn.execute('SELECT txn_date FROM "transaction"').fetchone()[0]
+    assert txn_date.startswith("2026-01-05")
+
+
+def test_sale_beyond_available_stock_reports_a_negative_stock_alert():
+    conn = _conn()
+    bill = repository.finalize_draft(
+        conn, _saved_draft(conn, _draft(bill_type="sale"))
+    )
+    assert any("Rice" in alert for alert in bill["stock_alerts"])
+
+
+def _finalized(conn, **overrides):
+    return repository.finalize_draft(conn, _saved_draft(conn, _draft(**overrides)))
+
+
+def test_invoice_totals_ladder_adds_up_to_the_grand_total():
+    """Every printed money row must reconcile with the amount due."""
+    from app.billing.pdf import build_totals_rows
+
+    conn = _conn()
+    bill = _finalized(
+        conn,
+        gst_mode="gst",
+        gst_rate="18",
+        tax_scheme="cgst_sgst",
+        discount_paise=1000,
+        extra_charge_paise=500,
+        round_off_paise=-47,
+        items=[
+            {"name": "Rice", "quantity": "2", "unit": "kg",
+             "unit_price_paise": 5000, "written_total_paise": 10000}
+        ],
+    )
+    rows = build_totals_rows(bill)
+    ladder = sum(row["paise"] for row in rows if row["kind"] == "ladder")
+    grand = next(row for row in rows if row["kind"] == "grand")
+    assert ladder == grand["paise"] == bill["grand_total_paise"]
+
+    labels = [row["label"] for row in rows]
+    assert "Discount" in labels and "Round off" in labels
+    assert any(label.startswith("CGST") for label in labels)
+    assert any(label.startswith("SGST") for label in labels)
+
+
+def test_invoice_line_totals_reconcile_with_the_printed_subtotal():
+    from app.billing.pdf import build_totals_rows
+
+    conn = _conn()
+    bill = _finalized(conn, gst_mode="gst", gst_rate="18", tax_scheme="igst")
+    rows = build_totals_rows(bill)
+    subtotal = next(row for row in rows if row["label"] == "Net total")
+    assert subtotal["paise"] == sum(
+        item["line_total_paise"] for item in bill["items"]
+    )
+
+
+def test_credit_invoice_shows_the_outstanding_balance():
+    from app.billing.pdf import build_totals_rows
+
+    conn = _conn()
+    bill = _finalized(conn, payment_status="credit")
+    balance = next(row for row in build_totals_rows(bill) if row["label"] == "Balance due")
+    assert balance["paise"] == bill["grand_total_paise"]
+
+
+def test_invoice_pdf_renders_for_gst_and_non_gst_bills():
+    from app.billing.pdf import build_bill_pdf
+
+    conn = _conn()
+    for overrides in (
+        {"gst_mode": "non_gst"},
+        {"gst_mode": "gst", "gst_rate": "12", "tax_scheme": "cgst_sgst"},
+    ):
+        pdf = build_bill_pdf(_finalized(_conn(), **overrides))
+        assert pdf.startswith(b"%PDF") and len(pdf) > 2000
+
+
+def test_amount_in_words_uses_indian_numbering():
+    from app.billing.pdf import amount_in_words
+
+    assert amount_in_words(12550) == "One Hundred Twenty Five Rupees and Fifty Paise Only"
+    assert amount_in_words(10000000) == "One Lakh Rupees Only"
+
+
+def test_seal_is_generated_per_party_and_stays_inside_the_ring():
+    from app.billing.pdf import build_party_seal
+
+    for name, phone in (
+        ("Srishti", "9700480123"),
+        ("Verma Traders & Sons", "9123456780"),
+        ("Ramesh", None),
+    ):
+        seal = build_party_seal(name, phone, 27.0)
+        texts = [
+            shape.text
+            for shape in seal.contents
+            if getattr(shape, "text", None) is not None
+        ]
+        assert any(name.split()[0].upper() in text for text in texts)
+        assert all(
+            shape.x - 0.01 <= 27.0 and shape.y >= -0.01
+            for shape in seal.contents
+            if hasattr(shape, "x")
+        )
+
+
+def test_unrecognised_answer_is_reported_instead_of_silently_ignored():
+    conn = _conn()
+    draft_id = _saved_draft(conn, BillDraftData(document_kind="bill"))
+    ignored = service.answer_draft(
+        conn, draft_id, "hmm let me check the register", extractor=FakeBillExtractor()
+    )
+    assert ignored["answer_applied"] is False
+
+    applied = service.answer_draft(
+        conn, draft_id, "purchase bill", extractor=FakeBillExtractor()
+    )
+    assert applied["answer_applied"] is True
+
+
+@pytest.mark.parametrize(
+    "answer,expected",
+    [
+        ("bill date 2026-01-18", "2026-01-18"),
+        ("18/01/2026", "2026-01-18"),
+        ("18-1-26", "2026-01-18"),
+        ("18 January 2026", "2026-01-18"),
+        ("18th Jan 2026", "2026-01-18"),
+        ("Jan 18, 2026", "2026-01-18"),
+        ("18 jan", "2026-01-18"),
+        ("date 18 January 2026 hai", "2026-01-18"),
+    ],
+)
+def test_dates_are_understood_in_the_way_shopkeepers_write_them(answer, expected):
+    import app.billing.extractors as extractors
+
+    class _FixedDate(date):
+        @classmethod
+        def today(cls):
+            return date(2026, 8, 3)
+
+    original = extractors.date
+    extractors.date = _FixedDate
+    try:
+        draft = FakeBillExtractor().refine(BillDraftData(document_kind="bill"), answer)
+    finally:
+        extractors.date = original
+    assert draft.bill_date == expected
+
+
+def test_relative_day_words_are_understood():
+    import app.billing.extractors as extractors
+
+    class _FixedDate(date):
+        @classmethod
+        def today(cls):
+            return date(2026, 8, 3)
+
+    original = extractors.date
+    extractors.date = _FixedDate
+    try:
+        assert FakeBillExtractor().refine(
+            BillDraftData(document_kind="bill"), "kal ka bill hai"
+        ).bill_date == "2026-08-02"
+        assert FakeBillExtractor().refine(
+            BillDraftData(document_kind="bill"), "aaj"
+        ).bill_date == "2026-08-03"
+    finally:
+        extractors.date = original

@@ -373,3 +373,17 @@ button:focus-visible,input:focus-visible,a:focus-visible{outline:3px solid rgba(
 @media (prefers-reduced-motion:reduce){
   *,*::before,*::after{animation-duration:.01ms!important;animation-iteration-count:1!important;scroll-behavior:auto!important}
 }
+
+/* ---- speak-while-typing toggle (voice replies for typed messages) ---- */
+.speak-toggle {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 32px; height: 32px; margin-right: 6px;
+  border: 1px solid var(--line, #d8e0e0); border-radius: 50%;
+  background: transparent; color: var(--muted, #6a7b7b);
+  font-size: .82rem; cursor: pointer; flex: 0 0 auto;
+  transition: background .15s ease, color .15s ease, border-color .15s ease;
+}
+.speak-toggle.on {
+  background: var(--brand, #11C5C5); border-color: var(--brand, #11C5C5); color: #fff;
+}
+.speak-toggle:active { transform: scale(.94); }

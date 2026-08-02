@@ -208,7 +208,12 @@ def answer_draft(
             backend=record.get("extractor_backend"),
         )
     provider = extractor or get_extractor(record.get("extractor_backend"))
-    updated = provider.refine(data, answer)
-    return repository.save_draft_data(
+    updated = remove_empty_items(provider.refine(data, answer))
+    result = repository.save_draft_data(
         conn, draft_id, updated, backend=record.get("extractor_backend")
     )
+    # Tell the caller whether the reply actually changed anything, so the
+    # assistant can say "I did not catch that" instead of silently repeating
+    # the same question and sounding broken.
+    result["answer_applied"] = updated.model_dump() != data.model_dump()
+    return result

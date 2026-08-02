@@ -71,3 +71,31 @@ def test_reminder_api_requires_phone_or_explicit_skip(client):
 
     skipped = client.post("/reminders", json={**payload, "skip_phone": True})
     assert skipped.status_code == 200
+
+
+def test_typed_chat_is_silent_unless_speaking_is_requested(client, monkeypatch):
+    from app import config, main, voice
+
+    monkeypatch.setattr(config, "has_voice", lambda: True)
+    monkeypatch.setattr(main.config, "has_voice", lambda: True)
+    monkeypatch.setattr(voice, "synthesize", lambda text, lang="hi": b"ID3audio")
+
+    silent = client.post("/chat", json={"message": "namaste"}).json()
+    assert silent["audio_b64"] is None
+
+    spoken = client.post("/chat", json={"message": "namaste", "speak": True}).json()
+    assert spoken["audio_b64"] and spoken["reply"] == silent["reply"]
+
+
+def test_speaking_failure_never_costs_the_written_reply(client, monkeypatch):
+    from app import config, main, voice
+
+    def _boom(text, lang="hi"):
+        raise RuntimeError("tts down")
+
+    monkeypatch.setattr(config, "has_voice", lambda: True)
+    monkeypatch.setattr(main.config, "has_voice", lambda: True)
+    monkeypatch.setattr(voice, "synthesize", _boom)
+
+    body = client.post("/chat", json={"message": "namaste", "speak": True}).json()
+    assert body["audio_b64"] is None and body["reply"]

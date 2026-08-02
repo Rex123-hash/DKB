@@ -303,6 +303,7 @@ def finalize_draft(conn: sqlite3.Connection, draft_id: str) -> dict:
         bill_id = int(cursor.lastrowid)
 
         direction = "in" if data.bill_type == "purchase" else "out"
+        stock_alerts: list[str] = []
         for item, line in zip(data.items, calculation.lines, strict=True):
             assert item.name is not None
             assert item.unit_price_paise is not None
@@ -349,6 +350,15 @@ def finalize_draft(conn: sqlite3.Connection, draft_id: str) -> dict:
                 if direction == "in"
                 else current_quantity - quantity
             )
+            if new_quantity < 0:
+                # Selling more than the recorded stock is allowed — the book is
+                # often behind reality — but the shopkeeper must be told.
+                stock_alerts.append(
+                    f"{item.name.strip()} stock is now "
+                    f"{_quantity_text(new_quantity)}"
+                    f"{' ' + item.unit if item.unit else ''}. "
+                    "Please check your opening stock."
+                )
             conn.execute(
                 "UPDATE product SET quantity = ?, unit = COALESCE(?, unit), "
                 "updated_at = ? WHERE id = ?",
@@ -400,7 +410,9 @@ def finalize_draft(conn: sqlite3.Connection, draft_id: str) -> dict:
                     txn_type,
                     calculation.due_paise / 100,
                     f"Bill {bill_number}",
-                    _now(),
+                    # The ledger must follow the bill's own date, otherwise a
+                    # back-dated bill lands in today's statement.
+                    data.bill_date,
                 ),
             )
 
@@ -413,7 +425,9 @@ def finalize_draft(conn: sqlite3.Connection, draft_id: str) -> dict:
             (bill_id, _now(), draft_id),
         )
         conn.commit()
-        return get_bill(conn, bill_id)
+        posted = get_bill(conn, bill_id)
+        posted["stock_alerts"] = stock_alerts
+        return posted
     except Exception:
         conn.rollback()
         raise
@@ -438,6 +452,7 @@ def get_bill(conn: sqlite3.Connection, bill_id: int) -> dict:
     ]
     out = dict(row)
     out["items"] = items
+    out["stock_alerts"] = []
     out["total_rupees"] = out["grand_total_paise"] / 100
     out["paid_rupees"] = out["paid_paise"] / 100
     out["due_rupees"] = (

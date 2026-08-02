@@ -10,7 +10,7 @@ import json
 import os
 import re
 from decimal import Decimal, ROUND_HALF_UP
-from datetime import date
+from datetime import date, timedelta
 from pathlib import Path
 from typing import Protocol
 
@@ -570,101 +570,192 @@ def _ollama_chat_url() -> str:
     return configured.rstrip("/") + "/api/chat"
 
 
-def apply_simple_answer(draft: BillDraftData, answer: str) -> BillDraftData:
-    """Small deterministic refiner used by fake/offline development.
+_PARTY_LEAD_IN = re.compile(
+    r"\b(?:from|for|to|party|customer|supplier|naam|name)\b"
+    r"(?:\s+(?:name|is|ka|ke|hai|=|:))*\s+"
+    r"(?P<name>[A-Za-zऀ-ॿ][\wऀ-ॿ&.'\- ]*)",
+    re.I,
+)
+_NAME_STOP_WORDS = {
+    "gst", "non", "sale", "sales", "purchase", "paid", "cash", "credit",
+    "udhaar", "udhar", "partial", "igst", "cgst", "sgst", "bill", "date",
+}
 
-    It handles the high-value clarification answers. The UI can also submit a
-    structured patch for exact edits.
+
+def _rupees_to_paise(raw: str) -> int:
+    return int(
+        (Decimal(raw) * 100).quantize(Decimal("1"), rounding=ROUND_HALF_UP)
+    )
+
+
+_MONTHS = {
+    "jan": 1, "january": 1, "feb": 2, "february": 2, "mar": 3, "march": 3,
+    "apr": 4, "april": 4, "may": 5, "jun": 6, "june": 6, "jul": 7, "july": 7,
+    "aug": 8, "august": 8, "sep": 9, "sept": 9, "september": 9,
+    "oct": 10, "october": 10, "nov": 11, "november": 11, "dec": 12,
+    "december": 12,
+}
+_MONTH_PATTERN = "|".join(sorted(_MONTHS, key=len, reverse=True))
+_DAY_MONTH = re.compile(
+    rf"\b(\d{{1,2}})\s*(?:st|nd|rd|th)?\s*(?:of\s+)?({_MONTH_PATTERN})\b\.?"
+    r"\s*,?\s*(\d{2,4})?",
+    re.I,
+)
+_MONTH_DAY = re.compile(
+    rf"\b({_MONTH_PATTERN})\b\.?\s*(\d{{1,2}})\s*(?:st|nd|rd|th)?\s*,?\s*(\d{{2,4}})?",
+    re.I,
+)
+
+
+def _dated(day: int, month: int, year_text: str | None) -> str | None:
+    """Build a date, defaulting a missing year to the most recent past one."""
+    today = date.today()
+    if year_text:
+        year = int(year_text)
+        if year < 100:
+            year += 2000
+    else:
+        year = today.year
+    try:
+        value = date(year, month, day)
+    except ValueError:
+        return None
+    if not year_text and value > today:
+        # A bill is written before it is entered, so an unqualified "18 Jan"
+        # after that date this year means last year, never the future.
+        try:
+            value = date(year - 1, month, day)
+        except ValueError:
+            return None
+    return value.isoformat()
+
+
+def _find_date(text: str, lower: str) -> str | None:
+    """Read a bill date the way a shopkeeper actually writes or says it."""
+    iso = re.search(r"\b(20\d{2}-\d{1,2}-\d{1,2})\b", text)
+    if iso:
+        return normalize_bill_date(iso.group(1))
+    numeric = re.search(r"\b(\d{1,2}[./-]\d{1,2}[./-]\d{2,4})\b", text)
+    if numeric:
+        return normalize_bill_date(numeric.group(1))
+    written = _DAY_MONTH.search(text)
+    if written:
+        day, month, year = written.groups()
+        return _dated(int(day), _MONTHS[month.lower()], year)
+    written = _MONTH_DAY.search(text)
+    if written:
+        month, day, year = written.groups()
+        return _dated(int(day), _MONTHS[month.lower()], year)
+    if re.search(r"\b(parso|day before yesterday)\b", lower):
+        return (date.today() - timedelta(days=2)).isoformat()
+    if re.search(r"\b(kal|yesterday|kal ka)\b", lower):
+        return (date.today() - timedelta(days=1)).isoformat()
+    if re.search(r"\b(today|aaj|aaj ka|today's date)\b", lower):
+        return date.today().isoformat()
+    return None
+
+
+def _find_party_name(text: str) -> str | None:
+    """Only accept a name introduced by an explicit lead-in word."""
+    match = _PARTY_LEAD_IN.search(text)
+    if not match:
+        return None
+    # Stop at the first punctuation break so "from Verma Traders, date ..."
+    # never absorbs the rest of a multi-detail sentence.
+    name = re.split(r"[,;.\n]", match.group("name"))[0].strip()
+    words = [
+        word
+        for word in name.split()
+        if word.lower().strip(".-") not in _NAME_STOP_WORDS
+    ]
+    name = " ".join(words).strip()
+    return name or None
+
+
+def apply_simple_answer(draft: BillDraftData, answer: str) -> BillDraftData:
+    """Deterministic refiner that reads every detail in a single message.
+
+    A shopkeeper who says "purchase from Verma Traders, 3 Jan, non-GST, cash"
+    must never be asked those questions again, so this applies everything it
+    recognises instead of stopping at the first match. It only ever fills
+    values that are still empty: an existing figure is never overwritten and a
+    missing one is never guessed.
     """
     updated = draft.model_copy(deep=True)
     text = (answer or "").strip()
     lower = text.lower()
     if not text:
         return updated
+    matched = False
 
     if updated.bill_type is None:
-        if any(word in lower for word in ("purchase", "kharid", "khareed")):
-            updated.bill_type = "purchase"
-            return updated
-        if any(word in lower for word in ("sale", "sales", "bikri", "becha")):
-            updated.bill_type = "sale"
-            return updated
-        return updated
+        if re.search(r"\b(purchase|purchased|kharid\w*|khareed\w*)\b", lower):
+            updated.bill_type, matched = "purchase", True
+        elif re.search(r"\b(sale|sales|sold|bikri|bech\w*)\b", lower):
+            updated.bill_type, matched = "sale", True
 
     if not (updated.bill_date or "").strip():
-        iso = re.search(r"\b(20\d{2}-\d{2}-\d{2})\b", text)
-        if iso:
-            updated.bill_date = iso.group(1)
-        elif lower in {"today", "aaj", "today's date"}:
-            updated.bill_date = date.today().isoformat()
-        return updated
-
-    if not (updated.party.name or "").strip():
-        name = re.sub(
-            r"^(?:party|customer|supplier)(?:\s+name)?\s*(?:is|=|:)?\s*",
-            "",
-            text,
-            flags=re.I,
-        ).strip()
-        if name:
-            updated.party.name = name
-        return updated
+        found = _find_date(text, lower)
+        if found:
+            updated.bill_date, matched = found, True
 
     if updated.gst_mode is None:
-        if "non gst" in lower or "non-gst" in lower or "without gst" in lower:
-            updated.gst_mode = "non_gst"
-            return updated
-        if "gst" in lower:
-            updated.gst_mode = "gst"
-            rate = re.search(r"(\d+(?:\.\d+)?)\s*%", lower)
-            if rate:
-                updated.gst_rate = rate.group(1)
-            return updated
+        if re.search(r"\b(non[\s-]?gst|without gst|bina gst)\b", lower):
+            updated.gst_mode, matched = "non_gst", True
+        elif "gst" in lower:
+            updated.gst_mode, matched = "gst", True
 
     if updated.gst_mode == "gst" and updated.gst_rate is None:
-        rate = re.search(r"(\d+(?:\.\d+)?)\s*%?", lower)
+        # Require an explicit percent or GST context so a date or phone number
+        # can never be read as a tax rate.
+        rate = re.search(
+            r"(\d+(?:\.\d+)?)\s*(?:%|percent|pct)|gst\s*(?:@|of|rate)?\s*"
+            r"(\d+(?:\.\d+)?)",
+            lower,
+        )
         if rate:
-            updated.gst_rate = rate.group(1)
-            return updated
+            updated.gst_rate, matched = (rate.group(1) or rate.group(2)), True
+        elif re.fullmatch(r"\d+(?:\.\d+)?", lower):
+            updated.gst_rate, matched = lower, True
 
     if updated.tax_scheme is None and updated.gst_mode == "gst":
-        if "igst" in lower or "interstate" in lower or "inter-state" in lower:
-            updated.tax_scheme = "igst"
-            return updated
-        if "cgst" in lower or "sgst" in lower or "same state" in lower:
-            updated.tax_scheme = "cgst_sgst"
-            return updated
+        if re.search(r"\b(igst|inter[\s-]?state)\b", lower):
+            updated.tax_scheme, matched = "igst", True
+        elif re.search(r"\b(cgst|sgst|same state|intra[\s-]?state)\b", lower):
+            updated.tax_scheme, matched = "cgst_sgst", True
 
     if updated.payment_status is None:
-        if "partial" in lower or "part payment" in lower:
-            updated.payment_status = "partial"
-            amount = re.search(r"(\d+(?:\.\d+)?)", lower)
-            if amount:
-                updated.paid_amount_paise = int(
-                    (Decimal(amount.group(1)) * 100).quantize(
-                        Decimal("1"), rounding=ROUND_HALF_UP
-                    )
-                )
-            return updated
-        if any(word in lower for word in ("credit", "udhaar", "udhar")):
-            updated.payment_status = "credit"
-            return updated
-        if any(word in lower for word in ("paid", "cash", "payment ho gaya")):
-            updated.payment_status = "paid"
-            return updated
+        if re.search(r"\b(partial|part payment|aadha|adha)\b", lower):
+            updated.payment_status, matched = "partial", True
+        elif re.search(r"\b(credit|udhaar|udhar|baaki|baki)\b", lower):
+            updated.payment_status, matched = "credit", True
+        elif re.search(r"\b(paid|cash|nakad|payment ho gaya|full payment)\b", lower):
+            updated.payment_status, matched = "paid", True
 
-    if (
-        updated.payment_status == "partial"
-        and updated.paid_amount_paise is None
-    ):
-        amount = re.search(r"(\d+(?:\.\d+)?)", lower)
+    if updated.payment_status == "partial" and updated.paid_amount_paise is None:
+        amount = re.search(
+            r"(?:rs\.?|inr|₹)\s*(\d+(?:\.\d+)?)"
+            r"|(\d+(?:\.\d+)?)\s*(?:rs\.?|rupees|rupaye)"
+            r"|(?:paid|diya|jama|partial)\D{0,12}?(\d+(?:\.\d+)?)",
+            lower,
+        )
         if amount:
-            updated.paid_amount_paise = int(
-                (Decimal(amount.group(1)) * 100).quantize(
-                    Decimal("1"), rounding=ROUND_HALF_UP
-                )
+            updated.paid_amount_paise = _rupees_to_paise(
+                next(group for group in amount.groups() if group)
             )
-            return updated
+            matched = True
+        elif re.fullmatch(r"\d+(?:\.\d+)?", lower):
+            updated.paid_amount_paise, matched = _rupees_to_paise(lower), True
+
+    if not (updated.party.phone or "").strip():
+        phone = re.search(r"\b([6-9]\d{9})\b", re.sub(r"[\s-]", "", text))
+        if phone:
+            updated.party.phone, matched = phone.group(1), True
+
+    if not (updated.party.gstin or "").strip():
+        gstin = re.search(r"\b(\d{2}[A-Z]{5}\d{4}[A-Z][A-Z\d]Z[A-Z\d])\b", text.upper())
+        if gstin:
+            updated.party.gstin, matched = gstin.group(1), True
 
     missing_quantities = [
         item for item in updated.items if not (item.quantity or "").strip()
@@ -680,12 +771,35 @@ def apply_simple_answer(draft: BillDraftData, answer: str) -> BillDraftData:
         if len(missing_quantities) > 1 and all_one:
             for item in missing_quantities:
                 item.quantity = "1"
-            return updated
-        if len(missing_quantities) == 1:
+            matched = True
+        elif len(missing_quantities) == 1:
             quantity = re.search(r"\b(\d+(?:\.\d+)?)\b", lower)
             if quantity:
                 missing_quantities[0].quantity = quantity.group(1)
-                return updated
+                matched = True
+
+    if not (updated.party.name or "").strip():
+        name = _find_party_name(text)
+        if name:
+            updated.party.name = name
+        elif not matched:
+            # Nothing structured was recognised, so a bare reply to the open
+            # "what is the party name?" question is the only sensible reading —
+            # but only when it actually reads like a name. A rambling sentence
+            # must never become a customer record.
+            fallback = re.sub(
+                r"^(?:party|customer|supplier)(?:\s+name)?\s*(?:is|=|:)?\s*",
+                "",
+                text,
+                flags=re.I,
+            ).strip()
+            if (
+                fallback
+                and len(fallback) <= 60
+                and len(fallback.split()) <= 5
+                and not re.search(r"[?!]", fallback)
+            ):
+                updated.party.name = fallback
     return updated
 
 

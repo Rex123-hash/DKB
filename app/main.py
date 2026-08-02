@@ -74,11 +74,13 @@ class ChatRequest(BaseModel):
     message: str
     lang: str = "auto"
     session_id: str = "default"
+    speak: bool = False
 
 
 class ChatResponse(BaseModel):
     reply: str
     llm: bool = False
+    audio_b64: str | None = None
 
 
 class PartyIn(BaseModel):
@@ -120,10 +122,18 @@ def health() -> dict:
 # ---- AI Assistant (separate module) ----
 @app.post("/chat", response_model=ChatResponse)
 def chat(req: ChatRequest) -> ChatResponse:
-    return ChatResponse(
-        reply=brain.respond(req.message, req.lang, session_id=req.session_id),
-        llm=config.has_llm(),
-    )
+    reply = brain.respond(req.message, req.lang, session_id=req.session_id)
+    audio_b64 = None
+    if req.speak and config.has_voice():
+        # Speak-while-typing is opt-in. A TTS failure must never cost the user
+        # their written answer, so the text reply is returned either way.
+        try:
+            out = voice.synthesize(reply, req.lang if req.lang != "auto" else "hi")
+            if out:
+                audio_b64 = base64.b64encode(out).decode()
+        except Exception:
+            pass
+    return ChatResponse(reply=reply, llm=config.has_llm(), audio_b64=audio_b64)
 
 
 @app.post("/voice/chat")

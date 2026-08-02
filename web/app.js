@@ -6,6 +6,9 @@ const state = {
   nav: "home",          // home | stock | bills | menu
   billTab: "sale",      // sale | purchase
   activeDraftId: null,
+  // Speak-while-typing. A spoken question is always answered aloud
+  // regardless of this switch; it only governs typed messages.
+  speakReplies: localStorage.getItem("db_speak_replies") === "1",
   parties: [],
   search: "",
   sessionId: localStorage.getItem("db_sid") || (() => {
@@ -62,6 +65,7 @@ const FA_ICONS = {
   clock: ["fa-solid", "fa-clock"], trash: ["fa-solid", "fa-trash-can"],
   card: ["fa-solid", "fa-address-card"], message: ["fa-solid", "fa-message"],
   gst: ["fa-solid", "fa-indian-rupee-sign"], image: ["fa-solid", "fa-image"],
+  speakerOn: ["fa-solid", "fa-volume-high"], speakerOff: ["fa-solid", "fa-volume-xmark"],
 };
 const chatIcon = (name) => {
   const classes = FA_ICONS[name];
@@ -86,6 +90,24 @@ function setStopResponseVisible(visible) {
   if (stop) stop.classList.toggle("hidden", !visible);
   if (safe) safe.classList.toggle("hidden", visible);
 }
+function playReplyAudio(base64) {
+  try {
+    activeResponseAudio = new Audio("data:audio/mp3;base64," + base64);
+    activeResponseAudio.onended = () => {
+      activeResponseAudio = null;
+      setStopResponseVisible(false);
+    };
+    setStopResponseVisible(true);
+    activeResponseAudio.play().catch(() => {
+      // Autoplay can be blocked until the user interacts; the text reply stands.
+      activeResponseAudio = null;
+      setStopResponseVisible(false);
+    });
+  } catch {
+    activeResponseAudio = null;
+  }
+}
+
 function stopActiveAIResponse() {
   if (activeResponseAbort) activeResponseAbort.abort();
   if (activeResponseAudio) {
@@ -419,6 +441,11 @@ async function openChat() {
           <div class="assistant-name">DukanBook Assistant</div>
           <div class="assistant-status"><span></span> Online · Hindi, English & Hinglish</div>
         </div>
+        <button class="speak-toggle${state.speakReplies ? " on" : ""}" id="speakToggle" type="button"
+          aria-pressed="${state.speakReplies}"
+          title="${state.speakReplies ? "Assistant bolega bhi" : "Sirf likhega; voice sawal ka jawab phir bhi bolega"}">
+          ${chatIcon(state.speakReplies ? "speakerOn" : "speakerOff")}
+        </button>
         <div class="private-chip" id="privateIndicator" title="Bills are posted only after your confirmation">
           ${chatIcon("shield")}<span>Safe</span>
         </div>
@@ -455,6 +482,22 @@ Khata update karein, reminder banayein, business sawal poochhein, ya handwritten
     </div>`;
   $("#back").onclick = () => { state.nav = "menu"; render(); };
   $("#stopResponseBtn").onclick = stopActiveAIResponse;
+  $("#speakToggle").onclick = (event) => {
+    state.speakReplies = !state.speakReplies;
+    localStorage.setItem("db_speak_replies", state.speakReplies ? "1" : "0");
+    const button = event.currentTarget;
+    button.classList.toggle("on", state.speakReplies);
+    button.setAttribute("aria-pressed", String(state.speakReplies));
+    button.innerHTML = chatIcon(state.speakReplies ? "speakerOn" : "speakerOff");
+    if (!state.speakReplies && activeResponseAudio) {
+      activeResponseAudio.pause();
+      activeResponseAudio = null;
+      setStopResponseVisible(false);
+    }
+    toast(state.speakReplies
+      ? "Awaaz on — main likhe hue sawaal ka jawab bhi bolunga"
+      : "Awaaz off — voice se poochenge to phir bhi bolunga");
+  };
   let sending = false;
   const syncComposer = () => {
     const hasMessage = !!$("#chatBox").value.trim();
@@ -486,9 +529,12 @@ Khata update karein, reminder banayein, business sawal poochhein, ya handwritten
           appendDraftCard(draft);
         }
       } else {
-        const r = await postJSON("/chat", { message: msg, session_id: state.sessionId }, { signal: activeResponseAbort.signal });
+        const r = await postJSON("/chat", {
+          message: msg, session_id: state.sessionId, speak: state.speakReplies,
+        }, { signal: activeResponseAbort.signal });
         stopBubbleLoading(typing);
         typing.innerHTML = linkify(r.reply);
+        if (r.audio_b64) playReplyAudio(r.audio_b64);
       }
     } catch (error) {
       stopBubbleLoading(typing);
@@ -630,8 +676,47 @@ function missingQuestion(path) {
   if (/items\.\d+\.unit_price_paise/.test(path)) return "What is the missing item price?";
   return `Please confirm ${path}.`;
 }
+
+// Short noun-phrases so several gaps can be asked for in one natural sentence
+// instead of interrogating the shopkeeper one field at a time.
+const missingShort = {
+  bill_type: "sale ya purchase",
+  bill_date: "bill ki date",
+  "party.name": "party ka naam",
+  gst_mode: "GST ya non-GST",
+  gst_rate: "GST %",
+  tax_scheme: "CGST+SGST ya IGST",
+  payment_status: "paid, udhaar ya partial",
+  paid_amount_paise: "kitna paid hua",
+  items: "kam se kam ek item",
+  "items.quantities": "items ki quantity",
+  "items.prices": "items ka rate",
+};
+function missingShortLabel(path) {
+  if (missingShort[path]) return missingShort[path];
+  if (/items\.\d+\.name/.test(path)) return "item ka naam";
+  if (/items\.\d+\.quantity/.test(path)) return "item ki quantity";
+  if (/items\.\d+\.unit_price_paise/.test(path)) return "item ka rate";
+  return path;
+}
+function missingAsk(fields) {
+  const pending = (fields || []).filter(Boolean);
+  if (!pending.length) return "";
+  if (pending.length === 1) return missingQuestion(pending[0]);
+  const shown = pending.slice(0, 3).map(missingShortLabel);
+  const rest = pending.length - shown.length;
+  const list = shown.slice(0, -1).join(", ") + " aur " + shown[shown.length - 1];
+  return `Bas itna reh gaya — ${list}${rest > 0 ? ` (+${rest} aur)` : ""}. `
+    + "Sab ek hi message mein bata dijiye, main samajh lunga.";
+}
 function billAssistantReply(draft) {
   const calc = draft.calculation || {};
+  if (draft.answer_applied === false) {
+    const ask = missingAsk(calc.missing_fields);
+    return ask
+      ? `Sorry, wo main pakad nahi paaya. ${ask} Ya "Fill details manually" tap kar lijiye.`
+      : "Sorry, wo main pakad nahi paaya. Review kholkar detail seedhe edit kar lijiye.";
+  }
   const errors = (calc.warnings || []).filter((w) => w.severity === "error");
   const cautions = (calc.warnings || []).filter((w) => w.severity === "warning");
   const notBill = errors.find((warning) =>
@@ -640,7 +725,11 @@ function billAssistantReply(draft) {
     return `This image cannot be processed as a bill: ${notBill.message} Please upload a clear sale or purchase bill.`;
   }
   if ((calc.missing_fields || []).length) {
-    return `I saved the scan. ${missingQuestion(calc.missing_fields[0])} You can type or speak the answer.`;
+    const read = (draft.data || {}).items || [];
+    const opener = read.length
+      ? `Bill padh liya — ${read.length} item mile.`
+      : "Scan save kar liya.";
+    return `${opener} ${missingAsk(calc.missing_fields)} Type ya bol kar bata dijiye.`;
   }
   if (errors.length) {
     return `I found a calculation mismatch: ${errors[0].message} Open Review to compare and accept or correct it.`;
@@ -660,7 +749,7 @@ function appendDraftCard(draft) {
   const card = document.createElement("div");
   card.className = "draft-card";
   const nextQuestion = (calc.missing_fields || []).length
-    ? missingQuestion(calc.missing_fields[0]) : null;
+    ? missingAsk(calc.missing_fields) : null;
   card.innerHTML = `
     <div class="draft-card-top"><span>${data.bill_type === "purchase" ? `${chatIcon("purchase")} Purchase` : data.bill_type === "sale" ? `${chatIcon("sale")} Sale` : `${chatIcon("receipt")} Bill draft`}</span>
       <b>${fmtPaise(calc.grand_total_paise)}</b></div>
@@ -678,7 +767,10 @@ function appendDraftCard(draft) {
   if (card.querySelector("[data-answer]")) {
     card.querySelector("[data-answer]").onclick = () => {
       const input = $("#chatBox");
-      input.placeholder = nextQuestion;
+      const pending = (calc.missing_fields || []).map(missingShortLabel);
+      input.placeholder = pending.length > 1
+        ? `${pending.slice(0, 3).join(", ")}…`
+        : nextQuestion;
       input.focus();
       toast(state.voice
         ? "Type below, or tap the microphone and speak"
@@ -694,7 +786,8 @@ function appendDraftCard(draft) {
 
 const rupeesValue = (paise) => paise == null ? "" : (Number(paise) / 100).toFixed(2).replace(/\.00$/, "");
 function toPaise(value, nullable = true) {
-  const text = String(value ?? "").trim();
+  // Shopkeepers type "1,200" and "₹1200"; both must mean 1200, never 0.
+  const text = String(value ?? "").replace(/[₹,\s]|Rs\.?/gi, "").trim();
   if (!text) return nullable ? null : 0;
   const number = Number(text);
   if (!Number.isFinite(number)) return nullable ? null : 0;
@@ -715,7 +808,7 @@ function openBillDraftEditor(draft) {
       <button class="close-x" id="cancel">×</button></div>
     ${warningHTML}
     ${(calc.missing_fields || []).length ? `<div class="missing-box"><b>AI still needs:</b>
-      ${esc((calc.missing_fields || []).map(missingQuestion).join(" "))}</div>` : ""}
+      ${esc((calc.missing_fields || []).map(missingShortLabel).join(", "))}</div>` : ""}
     <div class="review-grid">
       <div class="field"><label>Bill type *</label><select id="bdType">
         <option value="">Choose</option>${option("sale", data.bill_type, "Sale")}${option("purchase", data.bill_type, "Purchase")}
@@ -753,7 +846,7 @@ function openBillDraftEditor(draft) {
       `<button class="btn-ghost math-accept" id="acceptMath">Use the independently verified maths</button>` : ""}
     <div class="review-actions">
       <button class="btn-ghost" id="saveDraft">Save & recheck</button>
-      <button class="btn-primary" id="confirmDraft" ${draft.status !== "ready_for_review" ? "disabled" : ""}>Confirm & post bill</button>
+      <button class="btn-primary" id="confirmDraft">Confirm & post bill</button>
     </div>
   </div>`);
   $("#modalCard").classList.add("bill-modal");
@@ -797,6 +890,8 @@ function openBillDraftEditor(draft) {
       clearActiveDraft(); closeBillModal();
       document.querySelectorAll(".draft-card").forEach((card) => card.remove());
       addBubble(`Confirmed. I created DukanBook bill ${bill.bill_number} for ${fmtPaise(bill.grand_total_paise)} and updated ${bill.type === "purchase" ? "purchase stock, supplier ledger and cashbook" : "sales stock, customer ledger and cashbook"}.`, "bot");
+      (bill.stock_alerts || []).forEach((alert) =>
+        addBubble(`Heads up: ${alert}`, "bot"));
       loadData();
     } catch (e) { toast("Bill could not be posted: review the remaining issue"); }
   };
@@ -807,7 +902,9 @@ function closeBillModal() {
   closeModal();
 }
 function billItemEditorHTML(item, index) {
-  return `<div class="bill-item-editor" data-item-row>
+  // Carry the AI-read per-item GST rate on the row so an exact edit elsewhere
+  // in the form never silently discards it.
+  return `<div class="bill-item-editor" data-item-row data-gst-rate="${esc(item.gst_rate || "")}">
     <div class="item-row-head"><span>Item ${index + 1}</span><button data-remove-item title="Remove">×</button></div>
     <div class="review-grid">
       <div class="field wide"><label>Name *</label><input data-item="name" value="${esc(item.name || "")}" /></div>
@@ -838,7 +935,7 @@ function collectBillDraft(original) {
       unit_price_paise: toPaise(itemValue("price")),
       written_total_paise: toPaise(itemValue("written")),
       hsn: itemValue("hsn"),
-      gst_rate: null,
+      gst_rate: row.dataset.gstRate || null,
       confidence: {},
     };
   });
