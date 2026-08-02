@@ -14,8 +14,10 @@ def conn():
 @pytest.fixture(autouse=True)
 def _clear_sessions():
     brain._SESSIONS.clear()
+    brain._SESSION_CONTEXT.clear()
     yield
     brain._SESSIONS.clear()
+    brain._SESSION_CONTEXT.clear()
 
 
 def test_empty_message_gives_greeting():
@@ -176,6 +178,48 @@ def test_reminder_without_phone_allows_explicit_skip(conn):
     assert "reminder laga diya" in done
     assert db.list_reminders(conn)[0]["phone"] is None
 
+
+def test_reminder_uses_phone_supplied_with_all_other_details(conn):
+    s = "all-reminder-details"
+    out = brain.respond(
+        "Aman ko kal 5 baje 500 ka payment reminder lagao, phone 9876543210",
+        conn=conn,
+        session_id=s,
+    )
+    assert "reminder laga diya" in out
+    assert s not in brain._SESSIONS
+    assert db.list_reminders(conn)[0]["phone"] == "9876543210"
+
+
+def test_collect_flow_uses_inline_phone_instead_of_asking_again(conn):
+    s = "collect-inline-phone"
+    out = brain.respond(
+        "Aman se 500 payment maangna hai phone 9876543210",
+        conn=conn,
+        session_id=s,
+    )
+    assert "purpose" in out.lower()
+    assert "number kya hai" not in out.lower()
+    assert db.find_party_by_name(conn, "Aman")["phone"] == "9876543210"
+
+
+def test_phone_followup_can_reference_recent_message(conn):
+    from app import tools
+    tools.create_accounts(conn, ["Sita"])
+    s = "phone-from-context"
+
+    brain.respond("Mera number 9123456780 hai", conn=conn, session_id=s)
+    brain._SESSIONS[s] = {
+        "awaiting": "reminder_phone_only",
+        "reminder": {
+            "name": "Sita", "amount": 500, "purpose": "payment",
+            "due_at": "2026-08-03T17:00", "channel": "call",
+            "date_provided": True, "time_provided": True,
+        },
+    }
+    out = brain.respond("upar wale message mein likha hai", conn=conn, session_id=s)
+    assert "reminder laga diya" in out
+    assert db.list_reminders(conn)[0]["phone"] == "9123456780"
 
 def test_reminder_pronoun_asks_party_then_missing_amount(conn):
     s = "pronoun-reminder"

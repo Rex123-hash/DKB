@@ -77,6 +77,13 @@ def _smalltalk(message: str) -> str | None:
 #   {"awaiting": "phone", "queue": [{"id","name"}, ...], "retried": bool}
 # In-memory only — fine for a single-shopkeeper prototype; lost on restart.
 _SESSIONS: dict[str, dict] = {}
+_SESSION_CONTEXT: dict[str, dict] = {}
+
+_PREVIOUS_MESSAGE_PHRASES = (
+    "upar", "upar wale", "upar waale", "above", "previous message",
+    "last message", "pehle bataya", "pehle diya", "already diya",
+)
+
 
 _SKIP_WORDS = {"skip", "chhodo", "chhod", "chhoddo", "baad", "rehne", "nahi",
                "nahin", "no", "aage", "na"}
@@ -106,6 +113,18 @@ def respond(message: str, lang: str = "auto", conn=None, session_id: str = "defa
         conn = db.get_connection()
         db.init_db(conn)
     try:
+        # Remember only explicit contact details for this browser session.
+        explicit_phone = _parser._extract_phone(message)
+        context = _SESSION_CONTEXT.get(session_id)
+        if explicit_phone and context is None:
+            context = {"turn": 0, "phone": None, "phone_turn": -99}
+            _SESSION_CONTEXT[session_id] = context
+        if context is not None:
+            context["turn"] += 1
+            if explicit_phone:
+                context["phone"] = explicit_phone
+                context["phone_turn"] = context["turn"]
+
         # 1. Are we mid sub-dialog for this session? Handle it first so a bare
         #    number / 'skip' / free-text answer is treated as the reply, not a
         #    new command.
@@ -155,6 +174,7 @@ def respond(message: str, lang: str = "auto", conn=None, session_id: str = "defa
                     return _begin_phone_capture(created, session_id)
                 if pending_reminders:
                     pending = pending_reminders[0]
+                    pending["provided_phone"] = pending.get("provided_phone") or explicit_phone
                     pending["date_provided"] = _parser._extract_date_part(message.lower()) is not None
                     pending["time_provided"] = _parser._extract_time_part(message.lower()) is not None
                     return _begin_reminder_details(pending, session_id)
@@ -351,6 +371,7 @@ def _continue_reminder(r: dict, conn, session_id: str, *, skip_phone: bool = Fal
         result["time_provided"] = r.get("time_provided")
         return _begin_reminder_details(result, session_id)
     _SESSIONS.pop(session_id, None)
+    _SESSION_CONTEXT.pop(session_id, None)
     return _fmt_reminder(result)
 
 
@@ -420,6 +441,11 @@ def _start_collect(message: str, conn, session_id: str) -> str:
         pid = db.add_party(conn, name, "customer")
         row = db.get_party(conn, pid)
 
+    inline_phone = _parser._extract_phone(message)
+    if inline_phone:
+        tools.set_phone(conn, row["name"], inline_phone)
+        row = db.find_party_by_name(conn, row["name"])
+
     r = {"name": row["name"], "amount": amount, "phone": row["phone"], "purpose": None}
     if amount is None or amount <= 0:
         _SESSIONS[session_id] = {"awaiting": "reminder_collect_amount", "reminder": r}
@@ -434,8 +460,13 @@ def _start_collect(message: str, conn, session_id: str) -> str:
 def _handle_reminder_dialog(state: dict, message: str, conn, session_id: str) -> str:
     """Advance the guided reminder dialog: number -> purpose -> time -> save."""
     r = state["reminder"]
+    inline_phone = _parser._extract_phone(message)
+    if inline_phone:
+        r["provided_phone"] = inline_phone
+
     if message.strip().lower() in _CANCEL_PHRASES:
         _SESSIONS.pop(session_id, None)
+        _SESSION_CONTEXT.pop(session_id, None)
         return "Theek hai, reminder cancel kar diya."
 
     if state["awaiting"] == "reminder_party_only":
@@ -488,9 +519,9 @@ def _handle_reminder_dialog(state: dict, message: str, conn, session_id: str) ->
         return f"{r['name']} ka number kya hai? (ya ‘skip’ boliye)"
 
     if state["awaiting"] == "reminder_phone":
-        phone = tools.normalize_phone(message)
+        phone = tools.normalize_phone(message) or _phone_from_previous_message(message, session_id)
         if phone:
-            tools.set_phone(conn, r["name"], message)
+            tools.set_phone(conn, r["name"], phone)
             r["phone"] = phone
             state["awaiting"] = "reminder_purpose"
             return _ask_purpose(r)
@@ -499,19 +530,25 @@ def _handle_reminder_dialog(state: dict, message: str, conn, session_id: str) ->
             r["phone_skipped"] = True
             state["awaiting"] = "reminder_purpose"
             return _ask_purpose(r)
+        if _references_previous_message(message):
+            return "Maine recent messages check kiye, lekin valid 10-digit number nahi mila. Number dobara bataiye ya ‘skip’ boliye."
         return f"Yeh number theek nahi laga. {r['name']} ka 10-digit mobile bataiye (ya ‘skip’)."
 
     if state["awaiting"] == "reminder_phone_only":
-        phone = tools.normalize_phone(message)
+        phone = tools.normalize_phone(message) or _phone_from_previous_message(message, session_id)
         tokens = re.sub(r"[^\w\s]", " ", message.lower()).split()
         skipped = "skip" in tokens
         if not phone and not skipped:
+            if _references_previous_message(message):
+                return "Maine recent messages check kiye, lekin valid 10-digit number nahi mila. Number dobara bataiye ya ‘skip’ boliye."
+
             return (
                 f"Yeh number theek nahi laga. {r['name']} ka 10-digit mobile bataiye, "
                 "ya bina number ke reminder rakhne ke liye ‘skip’ boliye."
             )
         if phone:
-            tools.set_phone(conn, r["name"], message)
+            tools.set_phone(conn, r["name"], phone)
+            r["provided_phone"] = phone
         return _continue_reminder(r, conn, session_id, skip_phone=skipped)
 
     if state["awaiting"] == "reminder_purpose":
@@ -525,9 +562,26 @@ def _handle_reminder_dialog(state: dict, message: str, conn, session_id: str) ->
                             amount=r.get("amount"), channel="call",
                             skip_phone=bool(r.get("phone_skipped")))
     _SESSIONS.pop(session_id, None)
+    _SESSION_CONTEXT.pop(session_id, None)
     when = _humanize_due(due)
     return (f"Theek hai, {r['name']} ko {when} par call kar diya jayega. "
             f"Aapka jawab Reminders section me dikh jayega. Dhanyawaad.")
+
+
+def _references_previous_message(message: str) -> bool:
+    text = message.strip().lower()
+    return any(phrase in text for phrase in _PREVIOUS_MESSAGE_PHRASES)
+
+
+def _phone_from_previous_message(message: str, session_id: str) -> str | None:
+    """Resolve an explicitly referenced recent phone; never invent one."""
+    text = message.strip().lower()
+    if not any(phrase in text for phrase in _PREVIOUS_MESSAGE_PHRASES):
+        return None
+    context = _SESSION_CONTEXT.get(session_id) or {}
+    if context.get("turn", 0) - context.get("phone_turn", -99) > 6:
+        return None
+    return tools.normalize_phone(context.get("phone") or "")
 
 
 def _offline_respond(message: str, conn) -> str:
