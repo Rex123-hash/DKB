@@ -12,6 +12,7 @@ import re
 from decimal import Decimal, ROUND_HALF_UP
 from datetime import date, timedelta
 from pathlib import Path
+from concurrent.futures import ThreadPoolExecutor
 from typing import Protocol
 
 import requests
@@ -131,25 +132,179 @@ def _clean_decimal_text(raw: str | None) -> str | None:
     return formatted.rstrip("0").rstrip(".") if "." in formatted else formatted
 
 
-def recover_items(provider, draft: BillDraftData, **request_kwargs) -> None:
-    """Re-read the item table alone when the main pass returned no rows.
+class BillTermsRead(BaseModel):
+    """The words a shopkeeper writes around the table, read on their own.
+
+    Sale/purchase, GST and payment are usually scribbled beside or under the
+    items, and the combined pass drops them just as readily as it drops rows.
+    """
+
+    bill_type: str
+    gst_mode: str
+    tax_scheme: str
+    gst_rate: str
+    payment_status: str
+
+
+TERMS_PROMPT = """
+Read ONLY the wording of this Indian bill, not its item table.
+Every schema field is required; use an empty string when it is not written.
+Never infer or guess - if the bill does not say it, leave it empty.
+- bill_type: "purchase" if the bill says purchase/kharid, "sale" if it says
+  sale/bikri/cash memo issued by this shop, otherwise empty.
+- gst_mode: "gst" when GST/CGST/SGST/IGST/a tax column/GSTIN is written,
+  "non_gst" when it says without GST or bill of supply, otherwise empty.
+- tax_scheme: "igst" for inter-state, "cgst_sgst" when CGST/SGST appear.
+- gst_rate: the single percentage written for the whole bill, digits only.
+- payment_status: "paid" for cash/paid, "credit" for udhaar/due,
+  "partial" when only part was received.
+""".strip()
+
+
+_TERM_CHOICES = {
+    "bill_type": {"sale", "purchase"},
+    "gst_mode": {"gst", "non_gst"},
+    "tax_scheme": {"cgst_sgst", "igst"},
+    "payment_status": {"paid", "credit", "partial"},
+}
+
+
+def _apply_terms(draft: BillDraftData, terms: BillTermsRead) -> None:
+    for field, allowed in _TERM_CHOICES.items():
+        if getattr(draft, field) is None:
+            value = (getattr(terms, field) or "").strip().lower()
+            if value in allowed:
+                setattr(draft, field, value)
+    if draft.gst_rate is None:
+        rate = _clean_decimal_text(terms.gst_rate)
+        if rate is not None:
+            draft.gst_rate = rate
+
+
+def _needs_terms(draft: BillDraftData) -> bool:
+    return draft.document_kind == "bill" and any(
+        getattr(draft, field) is None
+        for field in ("bill_type", "gst_mode", "payment_status")
+    )
+
+
+_REFINABLE_FIELDS = (
+    "bill_type", "bill_number", "bill_date", "gst_mode", "gst_rate",
+    "tax_scheme", "payment_status", "paid_amount_paise",
+    "written_subtotal_paise", "written_grand_total_paise", "note",
+)
+
+
+def merge_refinement(
+    current: BillDraftData, response: BillDraftData
+) -> BillDraftData:
+    """Apply a clarification without letting it erase the rest of the bill.
+
+    The refinement schema is the same large one the extractor uses, and the
+    model answers it with a partial object just as readily — so replacing the
+    draft with the raw response silently wipes the items, the party and every
+    answer already given. Only what the reply actually carries is applied.
+    """
+    merged = current.model_copy(deep=True)
+    for field in _REFINABLE_FIELDS:
+        value = getattr(response, field, None)
+        if value not in (None, ""):
+            setattr(merged, field, value)
+    for part in ("name", "phone", "gstin"):
+        value = getattr(response.party, part, None)
+        if value not in (None, ""):
+            setattr(merged.party, part, value)
+    for field in ("discount_paise", "extra_charge_paise", "round_off_paise"):
+        value = getattr(response, field, 0)
+        if value:
+            setattr(merged, field, value)
+    if response.items:
+        merged.items = [item.model_copy(deep=True) for item in response.items]
+    return merged
+
+
+def _needs_header(draft: BillDraftData) -> bool:
+    return draft.document_kind == "bill" and not (
+        (draft.party.name or "").strip()
+        and (draft.bill_number or "").strip()
+        and (draft.bill_date or "").strip()
+    )
+
+
+def _apply_header(draft: BillDraftData, header: BillHeaderRead) -> None:
+    if not (draft.party.name or "").strip() and header.business_name.strip():
+        draft.party.name = header.business_name.strip()
+    if not (draft.bill_number or "").strip() and header.bill_number.strip():
+        draft.bill_number = header.bill_number.strip()
+    if not (draft.bill_date or "").strip():
+        draft.bill_date = normalize_bill_date(header.bill_date or header.date_text)
+
+
+def enrich_draft(provider, draft: BillDraftData, **request_kwargs) -> None:
+    """Re-read the item table and the header, together.
 
     The combined schema is large enough that the model regularly answers with a
-    partial object and omits `items` entirely — even for a crisp printed
-    invoice. Asking again for only the table reliably recovers it.
+    partial object — omitting `items` entirely, and dropping different header
+    fields on each call. Both re-reads are independent, so running them at the
+    same time costs the shopkeeper one wait instead of two.
     """
-    if draft.document_kind != "bill" or draft.items:
+    if draft.document_kind != "bill":
         return
-    try:
-        read = BillItemsRead.model_validate(
+    # Line items always come from the focused pass. The combined schema asks
+    # for integer paise and the model answers in rupees, which turns Rs 10 into
+    # 10 paise — a hundredfold money error. The focused pass reads the printed
+    # rupee text and this code does the conversion.
+    wants_items = True
+    wants_header = _needs_header(draft)
+    wants_terms = _needs_terms(draft)
+    if not (wants_items or wants_header or wants_terms):
+        return
+
+    def read_items() -> BillItemsRead:
+        return BillItemsRead.model_validate(
             provider._request(
                 ITEMS_PROMPT, BillItemsRead.model_json_schema(), **request_kwargs
             )
         )
-    except (requests.RequestException, ValueError):
-        # Recovery is best effort; the shopkeeper can still add rows in Review.
-        return
-    draft.items = items_from_read(read)
+
+    def read_header() -> BillHeaderRead:
+        return BillHeaderRead.model_validate(
+            provider._request(
+                HEADER_PROMPT, BillHeaderRead.model_json_schema(), **request_kwargs
+            )
+        )
+
+    def read_terms() -> BillTermsRead:
+        return BillTermsRead.model_validate(
+            provider._request(
+                TERMS_PROMPT, BillTermsRead.model_json_schema(), **request_kwargs
+            )
+        )
+
+    with ThreadPoolExecutor(max_workers=3) as pool:
+        items_task = pool.submit(read_items) if wants_items else None
+        header_task = pool.submit(read_header) if wants_header else None
+        terms_task = pool.submit(read_terms) if wants_terms else None
+        # Each re-read is best effort; the shopkeeper can still fix Review.
+        if items_task is not None:
+            try:
+                rows = items_from_read(items_task.result())
+                if rows:
+                    draft.items = rows
+            except (requests.RequestException, ValueError):
+                # Keep whatever the combined pass produced rather than nothing,
+                # but the review screen is the safety net for its figures.
+                pass
+        if header_task is not None:
+            try:
+                _apply_header(draft, header_task.result())
+            except (requests.RequestException, ValueError):
+                pass
+        if terms_task is not None:
+            try:
+                _apply_terms(draft, terms_task.result())
+            except (requests.RequestException, ValueError):
+                pass
 
 
 def items_from_read(read: BillItemsRead) -> list[BillItemDraft]:
@@ -393,7 +548,7 @@ class FakeBillExtractor:
 
 class OllamaBillExtractor:
     name = "ollama"
-    version = "ollama-v4-item-pass"
+    version = "ollama-v5-rupee-items"
 
     def __init__(
         self,
@@ -521,11 +676,14 @@ class OllamaBillExtractor:
             f"Current draft:\n{draft.model_dump_json()}\n\n"
             f"User correction:\n{answer}"
         )
-        return self._chat(
-            [
-                {"role": "system", "content": REFINEMENT_PROMPT},
-                {"role": "user", "content": prompt},
-            ]
+        return merge_refinement(
+            draft,
+            self._chat(
+                [
+                    {"role": "system", "content": REFINEMENT_PROMPT},
+                    {"role": "user", "content": prompt},
+                ]
+            ),
         )
 
 
@@ -533,7 +691,7 @@ class GeminiBillExtractor:
     """High-accuracy multimodal extractor using the configured Gemini key."""
 
     name = "gemini"
-    version = "gemini-v2-structured-vision-item-pass"
+    version = "gemini-v3-rupee-items-parallel"
 
     def __init__(self, model: str | None = None, timeout: float | None = None):
         self.model = model or os.environ.get(
@@ -602,33 +760,9 @@ class GeminiBillExtractor:
                 mime_type=mime_type,
             )
         )
-        recover_items(self, draft, image_bytes=image_bytes, mime_type=mime_type)
-        # The combined pass drops different header fields on each call, so
-        # re-read the header whenever any of them is still missing.
-        if draft.document_kind == "bill" and not (
-            (draft.party.name or "").strip()
-            and (draft.bill_number or "").strip()
-            and (draft.bill_date or "").strip()
-        ):
-            try:
-                header = BillHeaderRead.model_validate(
-                    self._request(
-                        HEADER_PROMPT,
-                        BillHeaderRead.model_json_schema(),
-                        image_bytes=image_bytes,
-                        mime_type=mime_type,
-                    )
-                )
-                if header.business_name.strip():
-                    draft.party.name = header.business_name.strip()
-                if not (draft.bill_number or "").strip() and header.bill_number.strip():
-                    draft.bill_number = header.bill_number.strip()
-                if not (draft.bill_date or "").strip():
-                    draft.bill_date = normalize_bill_date(
-                        header.bill_date or header.date_text
-                    )
-            except (requests.RequestException, ValueError):
-                pass
+        enrich_draft(
+            self, draft, image_bytes=image_bytes, mime_type=mime_type
+        )
         return remove_empty_items(draft)
 
     def refine(self, draft: BillDraftData, answer: str) -> BillDraftData:
@@ -640,8 +774,11 @@ class GeminiBillExtractor:
             f"{draft.model_dump_json()}\n\nUser correction:\n{answer}"
         )
         return remove_empty_items(
-            BillDraftData.model_validate(
-                self._request(prompt, BillDraftData.model_json_schema())
+            merge_refinement(
+                draft,
+                BillDraftData.model_validate(
+                    self._request(prompt, BillDraftData.model_json_schema())
+                ),
             )
         )
 
@@ -654,7 +791,7 @@ class VertexBillExtractor:
     """
 
     name = "vertex"
-    version = "vertex-gemini-document-ai-v2-item-pass"
+    version = "vertex-v3-rupee-items-parallel"
 
     def _request(
         self,
@@ -695,55 +832,38 @@ class VertexBillExtractor:
     ) -> BillDraftData:
         from app import gcp
 
-        try:
-            ocr_text = gcp.document_ai_ocr(image_bytes, mime_type)
-        except Exception:
-            # Document AI is optional enrichment; Gemini vision can still read
-            # the source image if no processor exists or OCR is unavailable.
-            ocr_text = ""
-        draft = BillDraftData.model_validate(
-            self._request(
+        def read_ocr() -> str:
+            try:
+                return gcp.document_ai_ocr(image_bytes, mime_type)
+            except Exception:
+                # Document AI is optional enrichment; Gemini vision can still
+                # read the image if no processor exists or OCR is unavailable.
+                return ""
+
+        # OCR and the first vision pass do not depend on each other, so the
+        # shopkeeper waits for the slower of the two rather than their sum.
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            ocr_task = pool.submit(read_ocr)
+            main_task = pool.submit(
+                self._request,
                 f"{GEMINI_EXTRACTION_PROMPT}\n\nFilename: {filename}",
                 BillDraftData.model_json_schema(),
                 image_bytes=image_bytes,
                 mime_type=mime_type,
-                ocr_text=ocr_text,
             )
-        )
-        recover_items(
+            raw = main_task.result()
+            ocr_text = ocr_task.result()
+
+        draft = BillDraftData.model_validate(raw)
+        # The transcript matters most for the focused re-reads, which is where
+        # handwriting is actually transcribed row by row.
+        enrich_draft(
             self,
             draft,
             image_bytes=image_bytes,
             mime_type=mime_type,
             ocr_text=ocr_text,
         )
-        # The combined pass drops different header fields on each call, so
-        # re-read the header whenever any of them is still missing.
-        if draft.document_kind == "bill" and not (
-            (draft.party.name or "").strip()
-            and (draft.bill_number or "").strip()
-            and (draft.bill_date or "").strip()
-        ):
-            try:
-                header = BillHeaderRead.model_validate(
-                    self._request(
-                        HEADER_PROMPT,
-                        BillHeaderRead.model_json_schema(),
-                        image_bytes=image_bytes,
-                        mime_type=mime_type,
-                        ocr_text=ocr_text,
-                    )
-                )
-                if header.business_name.strip():
-                    draft.party.name = header.business_name.strip()
-                if not (draft.bill_number or "").strip() and header.bill_number.strip():
-                    draft.bill_number = header.bill_number.strip()
-                if not (draft.bill_date or "").strip():
-                    draft.bill_date = normalize_bill_date(
-                        header.bill_date or header.date_text
-                    )
-            except (requests.RequestException, ValueError):
-                pass
         return remove_empty_items(draft)
 
     def refine(self, draft: BillDraftData, answer: str) -> BillDraftData:
@@ -755,8 +875,11 @@ class VertexBillExtractor:
             f"{draft.model_dump_json()}\n\nUser correction:\n{answer}"
         )
         return remove_empty_items(
-            BillDraftData.model_validate(
-                self._request(prompt, BillDraftData.model_json_schema())
+            merge_refinement(
+                draft,
+                BillDraftData.model_validate(
+                    self._request(prompt, BillDraftData.model_json_schema())
+                ),
             )
         )
 
@@ -783,12 +906,6 @@ _NAME_STOP_WORDS = {
     "gst", "non", "sale", "sales", "purchase", "paid", "cash", "credit",
     "udhaar", "udhar", "partial", "igst", "cgst", "sgst", "bill", "date",
 }
-
-
-def _rupees_to_paise(raw: str) -> int:
-    return int(
-        (Decimal(raw) * 100).quantize(Decimal("1"), rounding=ROUND_HALF_UP)
-    )
 
 
 _MONTHS = {

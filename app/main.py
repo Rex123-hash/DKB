@@ -136,6 +136,27 @@ def chat(req: ChatRequest) -> ChatResponse:
     return ChatResponse(reply=reply, llm=config.has_llm(), audio_b64=audio_b64)
 
 
+class SpeakRequest(BaseModel):
+    text: str = Field(min_length=1, max_length=2000)
+    lang: str = "hi"
+
+
+@app.post("/speak")
+def speak(req: SpeakRequest) -> dict:
+    """Speak a reply the client composed itself.
+
+    Bill answers are assembled in the browser, so without this the assistant
+    falls silent exactly when the shopkeeper is scanning a bill.
+    """
+    if not config.has_voice():
+        raise HTTPException(status_code=503, detail="voice libraries not installed")
+    try:
+        out = voice.synthesize(req.text, req.lang or "hi")
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"speech failed: {exc}") from exc
+    return {"audio_b64": base64.b64encode(out).decode() if out else None}
+
+
 @app.post("/voice/chat")
 def voice_chat(
     file: UploadFile = File(...),

@@ -99,3 +99,25 @@ def test_speaking_failure_never_costs_the_written_reply(client, monkeypatch):
 
     body = client.post("/chat", json={"message": "namaste", "speak": True}).json()
     assert body["audio_b64"] is None and body["reply"]
+
+
+def test_client_composed_replies_can_be_spoken(client, monkeypatch):
+    """Bill answers are built in the browser and still have to be speakable."""
+    from app import config, main, voice
+
+    monkeypatch.setattr(config, "has_voice", lambda: True)
+    monkeypatch.setattr(main.config, "has_voice", lambda: True)
+    monkeypatch.setattr(voice, "synthesize", lambda text, lang="hi": b"ID3audio")
+
+    body = client.post("/speak", json={"text": "Sale note kar liya."}).json()
+    assert body["audio_b64"]
+
+    assert client.post("/speak", json={"text": ""}).status_code == 422
+
+
+def test_speaking_is_unavailable_rather_than_silent_when_voice_is_off(client, monkeypatch):
+    from app import config, main
+
+    monkeypatch.setattr(config, "has_voice", lambda: False)
+    monkeypatch.setattr(main.config, "has_voice", lambda: False)
+    assert client.post("/speak", json={"text": "hello"}).status_code == 503

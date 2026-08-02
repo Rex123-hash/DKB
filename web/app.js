@@ -90,6 +90,18 @@ function setStopResponseVisible(visible) {
   if (stop) stop.classList.toggle("hidden", !visible);
   if (safe) safe.classList.toggle("hidden", visible);
 }
+// Speak text the browser composed itself (bill replies). `force` is used when
+// the shopkeeper asked by voice, which is always answered aloud whatever the
+// speaker toggle says.
+async function speakText(text, force = false) {
+  if (!force && !state.speakReplies) return;
+  if (!state.voice || !text) return;
+  try {
+    const res = await postJSON("/speak", { text: String(text).slice(0, 2000) });
+    if (res && res.audio_b64) playReplyAudio(res.audio_b64);
+  } catch { /* a silent reply is better than a lost one */ }
+}
+
 function playReplyAudio(base64) {
   try {
     activeResponseAudio = new Audio("data:audio/mp3;base64," + base64);
@@ -522,11 +534,14 @@ Khata update karein, reminder banayein, business sawal poochhein, ya handwritten
           clearActiveDraft();
           stopBubbleLoading(typing);
           typing.textContent = "Bill mode closed. The draft is still saved in Bills history for later review.";
+          speakText(typing.textContent);
         } else {
           const draft = await postJSON(`/bill-drafts/${state.activeDraftId}/answer`, { answer: msg }, { signal: activeResponseAbort.signal });
           stopBubbleLoading(typing);
-          typing.textContent = billAssistantReply(draft);
+          const billReply = billAssistantReply(draft);
+          typing.textContent = billReply;
           appendDraftCard(draft);
+          speakText(billReply);
         }
       } else {
         const r = await postJSON("/chat", {
@@ -761,12 +776,38 @@ function billAssistantReply(draft) {
     return `${opener} ${missingAsk(calc.missing_fields)}`;
   }
   if (errors.length) {
-    return `I found a calculation mismatch: ${errors[0].message} Open Review to compare and accept or correct it.`;
+    return `Hisaab mein farak hai: ${errors[0].message} Neeche "Use DukanBook's maths" tap kijiye, ya Review mein khud theek kar lijiye.`;
   }
   if (cautions.length) {
     return `I read the bill, but one value needs a careful look: ${cautions[0].message} Please check it in Review before confirming.`;
   }
   return `The bill is ready for review. I independently verified the total as ${fmtPaise(calc.grand_total_paise)}. Please review before confirming.`;
+}
+
+
+// One tap to accept DukanBook's own arithmetic in place of what the bill says.
+function withVerifiedMaths(draft) {
+  const data = JSON.parse(JSON.stringify(draft.data || {}));
+  const calc = draft.calculation || {};
+  (data.items || []).forEach((item, index) => {
+    const line = (calc.lines || [])[index] || {};
+    if (line.calculated_total_paise != null) item.written_total_paise = line.calculated_total_paise;
+  });
+  data.written_subtotal_paise = calc.subtotal_paise;
+  data.written_grand_total_paise = calc.grand_total_paise;
+  return data;
+}
+const hasMathsIssue = (draft) =>
+  ((draft.calculation || {}).warnings || []).some((w) =>
+    w.severity === "error" && /mismatch/.test(w.code || ""));
+
+async function acceptVerifiedMaths(draft) {
+  try {
+    const saved = await putJSON(`/bill-drafts/${draft.id}`, { data: withVerifiedMaths(draft) });
+    addBubble("Theek hai — maine apna verified hisaab laga diya. Ab review karke confirm kar dijiye.", "bot");
+    appendDraftCard(saved);
+    speakText("Maine apna verified hisaab laga diya.");
+  } catch { toast("Verified totals apply nahi ho paye"); }
 }
 
 function appendDraftCard(draft) {
@@ -789,6 +830,7 @@ function appendDraftCard(draft) {
     ${nextQuestion ? `<div class="draft-question"><b>AI asks:</b> ${esc(nextQuestion)}</div>` : ""}
     <div class="draft-actions">
       ${nextQuestion ? `<button data-answer>${chatIcon("mic")} Type or speak answer</button>` : ""}
+      ${!nextQuestion && hasMathsIssue(draft) ? `<button data-accept-maths>${chatIcon("calculator")} Use DukanBook's maths</button>` : ""}
       <button data-review>${nextQuestion ? `${chatIcon("pen")} Fill details manually` : `${chatIcon("check")} Review & confirm`}</button>
     </div>
     <button data-exit class="draft-exit">Exit bill</button>`;
@@ -805,6 +847,9 @@ function appendDraftCard(draft) {
         ? "Type below, or tap the microphone and speak"
         : "Type your answer below");
     };
+  }
+  if (card.querySelector("[data-accept-maths]")) {
+    card.querySelector("[data-accept-maths]").onclick = () => acceptVerifiedMaths(draft);
   }
   card.querySelector("[data-review]").onclick = () => openBillDraftEditor(draft);
   card.querySelector("[data-exit]").onclick = () => {
@@ -872,7 +917,7 @@ function openBillDraftEditor(draft) {
       <div class="grand"><span>AI-verified total</span><b>${fmtPaise(calc.grand_total_paise)}</b></div>
     </div>
     ${(calc.warnings || []).some((w) => w.severity === "error") ?
-      `<button class="btn-ghost math-accept" id="acceptMath">Use the independently verified maths</button>` : ""}
+      `<button class="btn-ghost math-accept" id="acceptMath">Use DukanBook's maths instead of the written figures</button>` : ""}
     <div class="review-actions">
       <button class="btn-ghost" id="saveDraft">Save & recheck</button>
       <button class="btn-primary" id="confirmDraft">Confirm & post bill</button>
@@ -1042,8 +1087,11 @@ async function sendVoice(blob, durationMs = 0) {
     stopBubbleLoading(botSaid);
     if (state.activeDraftId) {
       const draft = data.draft;
-      botSaid.textContent = billAssistantReply(draft);
+      const spokenReply = billAssistantReply(draft);
+      botSaid.textContent = spokenReply;
       appendDraftCard(draft);
+      // Asked by voice, answered by voice - whatever the speaker toggle says.
+      speakText(spokenReply, true);
     } else {
       botSaid.innerHTML = linkify(data.reply || "");
       if (data.audio_b64) {

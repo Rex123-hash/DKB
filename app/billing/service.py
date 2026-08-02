@@ -47,6 +47,7 @@ def scan_directory() -> Path:
 
 
 VISION_MAX_EDGE = int(os.environ.get("BILL_VISION_MAX_EDGE", "1600"))
+VISION_HEAVY_BYTES = int(os.environ.get("BILL_VISION_HEAVY_BYTES", 400 * 1024))
 
 
 def prepare_for_vision(image_bytes: bytes, mime_type: str) -> tuple[bytes, str]:
@@ -62,16 +63,26 @@ def prepare_for_vision(image_bytes: bytes, mime_type: str) -> tuple[bytes, str]:
         return image_bytes, mime_type
     try:
         with Image.open(BytesIO(image_bytes)) as image:
-            if max(image.size) <= VISION_MAX_EDGE:
+            oversized = max(image.size) > VISION_MAX_EDGE
+            # A screenshot-sized PNG can still be a megabyte. Every provider
+            # call re-uploads it, so re-encoding pays for itself several times
+            # over on one scan.
+            if not oversized and len(image_bytes) <= VISION_HEAVY_BYTES:
                 return image_bytes, mime_type
             image = image.convert("RGB")
-            image.thumbnail((VISION_MAX_EDGE, VISION_MAX_EDGE), Image.LANCZOS)
+            if oversized:
+                image.thumbnail((VISION_MAX_EDGE, VISION_MAX_EDGE), Image.LANCZOS)
             buffer = BytesIO()
             image.save(buffer, format="JPEG", quality=88, optimize=True)
     except Exception:
         # Never let preprocessing stop a scan; the original still works.
         return image_bytes, mime_type
-    return buffer.getvalue(), "image/jpeg"
+    prepared = buffer.getvalue()
+    return (
+        (prepared, "image/jpeg")
+        if len(prepared) < len(image_bytes)
+        else (image_bytes, mime_type)
+    )
 
 
 _ANSWERABLE_FIELDS = (

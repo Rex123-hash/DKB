@@ -876,3 +876,89 @@ def test_a_retry_keeps_the_answers_the_shopkeeper_already_gave(tmp_path, monkeyp
                               mime_type="image/png", session_id="s", extractor=seeing)
     assert again["data"]["bill_type"] == "purchase"
     assert [item["name"] for item in again["data"]["items"]] == ["Rice"]
+
+
+def test_amounts_written_with_symbols_or_blanks_survive_the_item_reader():
+    """The reader must tolerate blank cells and rupee symbols, not crash."""
+    from app.billing.extractors import BillItemsRead, items_from_read
+
+    items = items_from_read(BillItemsRead.model_validate({"items": [
+        {"name": "pencil", "quantity": "5", "unit": "", "unit_price_rupees": "",
+         "amount_rupees": "\u20b950", "hsn": "", "gst_rate": ""},
+        {"name": "pen", "quantity": "10", "unit": "pcs", "unit_price_rupees": "Rs 1,200.50",
+         "amount_rupees": "", "hsn": "9608", "gst_rate": "12"},
+    ]}))
+    assert items[0].written_total_paise == 5000 and items[0].unit_price_paise is None
+    assert items[1].unit_price_paise == 120050 and items[1].gst_rate == "12"
+
+
+def test_terms_read_fills_only_what_the_bill_actually_says():
+    from app.billing.extractors import BillTermsRead, _apply_terms
+
+    draft = BillDraftData(document_kind="bill", bill_type="sale")
+    _apply_terms(draft, BillTermsRead(
+        bill_type="purchase", gst_mode="gst", tax_scheme="",
+        gst_rate="18.00", payment_status="udhaar",
+    ))
+    assert draft.bill_type == "sale"          # already known, never overwritten
+    assert draft.gst_mode == "gst"
+    assert draft.gst_rate == "18"
+    assert draft.tax_scheme is None           # blank stays blank
+    assert draft.payment_status is None       # not a permitted value, so ignored
+
+
+def test_a_heavy_screenshot_is_re_encoded_before_every_provider_call():
+    from io import BytesIO
+    from PIL import Image
+    from app.billing.service import prepare_for_vision
+
+    # Small enough not to need resizing, but noisy enough to be a heavy PNG.
+    import random
+    random.seed(0)
+    image = Image.new("RGB", (950, 760))
+    image.putdata([(random.randrange(256),) * 3 for _ in range(950 * 760)])
+    buffer = BytesIO()
+    image.save(buffer, format="PNG")
+    heavy = buffer.getvalue()
+    assert len(heavy) > 400 * 1024
+
+    prepared, mime = prepare_for_vision(heavy, "image/png")
+    assert mime == "image/jpeg" and len(prepared) < len(heavy)
+
+
+def test_a_small_image_is_sent_exactly_as_the_shopkeeper_supplied_it():
+    from io import BytesIO
+    from PIL import Image
+    from app.billing.service import prepare_for_vision
+
+    buffer = BytesIO()
+    Image.new("RGB", (400, 300), "white").save(buffer, format="PNG")
+    original = buffer.getvalue()
+    assert prepare_for_vision(original, "image/png") == (original, "image/png")
+
+
+def test_a_clarification_never_wipes_the_bill_it_was_answering():
+    """The refine schema returns partial objects; a merge must protect the draft."""
+    from app.billing.extractors import merge_refinement
+
+    current = _draft(bill_type="purchase", gst_mode="gst", gst_rate="5")
+    partial = BillDraftData(document_kind="bill", payment_status="credit")
+
+    merged = merge_refinement(current, partial)
+    assert merged.payment_status == "credit"          # the correction applies
+    assert merged.bill_type == "purchase"             # everything else survives
+    assert merged.party.name == "Ramesh"
+    assert [item.name for item in merged.items] == ["Rice"]
+    assert merged.gst_rate == "5"
+
+
+def test_a_clarification_that_supplies_items_does_replace_them():
+    from app.billing.extractors import merge_refinement
+
+    merged = merge_refinement(
+        _draft(),
+        BillDraftData(document_kind="bill", items=[
+            BillItemDraft(name="Dal", quantity="3", unit_price_paise=7000)
+        ]),
+    )
+    assert [item.name for item in merged.items] == ["Dal"]
