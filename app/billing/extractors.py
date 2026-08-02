@@ -11,6 +11,7 @@ import os
 import re
 from decimal import Decimal, ROUND_HALF_UP
 from datetime import date, timedelta
+from io import BytesIO
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
 from typing import Protocol
@@ -101,6 +102,66 @@ split, or invent a row.
   terms and conditions, bank details, and the signature block are NOT rows.
 - Read handwritten rows as carefully as printed ones.
 """.strip()
+
+
+class BillMoneyRowRead(BaseModel):
+    """A spatial, numbers-only re-read for faint handwritten columns."""
+
+    row_number: int
+    quantity: str
+    unit_price_rupees: str
+    amount_rupees: str
+
+
+class BillMoneyRead(BaseModel):
+    items: list[BillMoneyRowRead] = Field(min_length=1)
+    written_grand_total_rupees: str
+
+
+MONEY_PROMPT = """
+Read ONLY the handwritten numeric columns and bottom total of this Indian bill.
+The photo may not have printed column headings. Use spatial layout carefully:
+- quantity is normally at the FAR LEFT of each product row (for example 5 kg),
+- for packs such as "20 x 100 ml", quantity is 20; do not join it into 20100,
+- unit rate is usually SMALL handwriting beside or just below the product name,
+- line amount is the LARGE number at the FAR RIGHT, often followed by a dash,
+- the grand total is the final large number below all product rows.
+
+Return every physical product row from top to bottom and number them 1, 2, 3...
+Copy visible digits exactly. Do not multiply, divide, infer, repair, or copy the
+grand total into a product row. Use an empty string for an unreadable value.
+""".strip()
+
+
+def enhance_for_money_read(
+    image_bytes: bytes, mime_type: str
+) -> tuple[bytes, str]:
+    """Upscale and clarify faint handwriting for the numbers-only vision pass.
+
+    The original image remains authoritative and stored unchanged. This variant
+    is lossless grayscale with local contrast and sharpening, which makes small
+    rate digits easier to distinguish without fabricating any strokes.
+    """
+    try:
+        from PIL import Image, ImageEnhance, ImageOps
+
+        with Image.open(BytesIO(image_bytes)) as source:
+            image = ImageOps.exif_transpose(source).convert("L")
+            longest = max(image.size)
+            scale = max(1.0, min(3.0, 2000 / longest))
+            if scale > 1.05:
+                image = image.resize(
+                    (round(image.width * scale), round(image.height * scale)),
+                    Image.Resampling.LANCZOS,
+                )
+            image = ImageOps.autocontrast(image, cutoff=1)
+            image = ImageEnhance.Contrast(image).enhance(1.25)
+            image = ImageEnhance.Sharpness(image).enhance(1.6)
+            buffer = BytesIO()
+            image.save(buffer, format="PNG", optimize=True)
+            return buffer.getvalue(), "image/png"
+    except Exception:
+        return image_bytes, mime_type
 
 
 def _rupees_to_paise(raw: str | None) -> int | None:
@@ -257,6 +318,9 @@ def enrich_draft(provider, draft: BillDraftData, **request_kwargs) -> None:
     wants_items = True
     wants_header = _needs_header(draft)
     wants_terms = _needs_terms(draft)
+    wants_money = bool(
+        draft.items and any(item.unit_price_paise is None for item in draft.items)
+    )
     if not (wants_items or wants_header or wants_terms):
         return
 
@@ -281,10 +345,28 @@ def enrich_draft(provider, draft: BillDraftData, **request_kwargs) -> None:
             )
         )
 
-    with ThreadPoolExecutor(max_workers=3) as pool:
+    def read_money() -> BillMoneyRead:
+        money_kwargs = dict(request_kwargs)
+        original = money_kwargs.get("image_bytes")
+        if original is not None:
+            enhanced, enhanced_mime = enhance_for_money_read(
+                original, money_kwargs.get("mime_type") or "image/jpeg"
+            )
+            money_kwargs["image_bytes"] = enhanced
+            money_kwargs["mime_type"] = enhanced_mime
+        return BillMoneyRead.model_validate(
+            provider._request(
+                MONEY_PROMPT, BillMoneyRead.model_json_schema(), **money_kwargs
+            )
+        )
+
+    with ThreadPoolExecutor(max_workers=4) as pool:
         items_task = pool.submit(read_items) if wants_items else None
         header_task = pool.submit(read_header) if wants_header else None
         terms_task = pool.submit(read_terms) if wants_terms else None
+        # Start the faint-number pass immediately when the first vision read
+        # already shows gaps. It then overlaps with item/header/terms reads.
+        money_task = pool.submit(read_money) if wants_money else None
         # Each re-read is best effort; the shopkeeper can still fix Review.
         if items_task is not None:
             try:
@@ -295,6 +377,12 @@ def enrich_draft(provider, draft: BillDraftData, **request_kwargs) -> None:
                 # Keep whatever the combined pass produced rather than nothing,
                 # but the review screen is the safety net for its figures.
                 pass
+        if (
+            money_task is None
+            and draft.items
+            and any(item.unit_price_paise is None for item in draft.items)
+        ):
+            money_task = pool.submit(read_money)
         if header_task is not None:
             try:
                 _apply_header(draft, header_task.result())
@@ -305,6 +393,17 @@ def enrich_draft(provider, draft: BillDraftData, **request_kwargs) -> None:
                 _apply_terms(draft, terms_task.result())
             except (requests.RequestException, ValueError):
                 pass
+        if money_task is not None:
+            try:
+                apply_money_read(draft, money_task.result())
+            except (requests.RequestException, ValueError):
+                # Cloud vision can occasionally reject one of several parallel
+                # structured requests. Retry only this small, critical pass;
+                # returning a false total is worse than a few extra seconds.
+                try:
+                    apply_money_read(draft, read_money())
+                except (requests.RequestException, ValueError):
+                    pass
 
 
 def items_from_read(read: BillItemsRead) -> list[BillItemDraft]:
@@ -328,6 +427,40 @@ def items_from_read(read: BillItemsRead) -> list[BillItemDraft]:
             )
         )
     return items
+
+
+def apply_money_read(draft: BillDraftData, read: BillMoneyRead) -> None:
+    """Fill only gaps from the enhanced, numbers-only re-read.
+
+    Row numbers deliberately anchor the merge to the original item order. A
+    second model pass is supporting evidence and must never overwrite a number
+    that was already read from the source image.
+    """
+    for row in read.items:
+        index = row.row_number - 1
+        if index < 0 or index >= len(draft.items):
+            continue
+        item = draft.items[index]
+        money_quantity = _clean_decimal_text(row.quantity)
+        current_quantity = _positive_decimal(item.quantity)
+        if current_quantity is None:
+            item.quantity = money_quantity
+        elif (
+            money_quantity is not None
+            and current_quantity > 1000
+            and _positive_decimal(money_quantity) <= 1000
+        ):
+            # Vision sometimes concatenates "20 x 100 ml" into quantity
+            # 20100. The spatial pass explicitly separates the pack count.
+            item.quantity = money_quantity
+        if item.unit_price_paise is None:
+            item.unit_price_paise = _rupees_to_paise(row.unit_price_rupees)
+        if item.written_total_paise is None:
+            item.written_total_paise = _rupees_to_paise(row.amount_rupees)
+    if draft.written_grand_total_paise is None:
+        draft.written_grand_total_paise = _rupees_to_paise(
+            read.written_grand_total_rupees
+        )
 
 
 HEADER_PROMPT = """
@@ -691,7 +824,7 @@ class GeminiBillExtractor:
     """High-accuracy multimodal extractor using the configured Gemini key."""
 
     name = "gemini"
-    version = "gemini-v3-rupee-items-parallel"
+    version = "gemini-v5-reliable-spatial-money"
 
     def __init__(self, model: str | None = None, timeout: float | None = None):
         self.model = model or os.environ.get(
@@ -791,7 +924,7 @@ class VertexBillExtractor:
     """
 
     name = "vertex"
-    version = "vertex-v3-rupee-items-parallel"
+    version = "vertex-v5-reliable-spatial-money"
 
     def _request(
         self,

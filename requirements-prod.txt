@@ -14,6 +14,7 @@ httpx
 python-dotenv
 python-multipart
 reportlab
+Pillow
 numpy
 edge-tts
 google-auth

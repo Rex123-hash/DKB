@@ -81,6 +81,11 @@ function toast(msg) {
 
 let activeResponseAbort = null;
 let activeResponseAudio = null;
+let activeResponseAudioResolve = null;
+let activeSpeechFetchAbort = null;
+let responseSpeechQueue = [];
+let responseSpeechQueueRunning = false;
+let responseSpeechEpoch = 0;
 const wasAborted = (error) => !!error && (
   error.name === "AbortError" || error.code === 20 || /abort|cancel/i.test(error.message || "")
 );
@@ -93,43 +98,118 @@ function setStopResponseVisible(visible) {
 // Speak text the browser composed itself (bill replies). `force` is used when
 // the shopkeeper asked by voice, which is always answered aloud whatever the
 // speaker toggle says.
-async function speakText(text, force = false) {
+function speakText(text, force = false) {
   if (!force && !state.speakReplies) return;
   if (!text) return;
-  // Deliberately not gated on state.voice: that flag is only set once /health
-  // resolves, and a reply arriving first would silently go unspoken.
-  try {
-    const res = await postJSON("/speak", { text: String(text).slice(0, 2000) });
-    if (res && res.audio_b64) playReplyAudio(res.audio_b64);
-  } catch { /* a silent reply is better than a lost one */ }
+  responseSpeechQueue.push({
+    text: String(text).slice(0, 2000),
+    epoch: responseSpeechEpoch,
+  });
+  drainResponseSpeechQueue();
 }
 
-function playReplyAudio(base64) {
+function queueReplyAudio(base64) {
+  if (!base64) return;
+  responseSpeechQueue.push({ audioBase64: base64, epoch: responseSpeechEpoch });
+  drainResponseSpeechQueue();
+}
+
+async function drainResponseSpeechQueue() {
+  if (responseSpeechQueueRunning) return;
+  responseSpeechQueueRunning = true;
   try {
-    activeResponseAudio = new Audio("data:audio/mp3;base64," + base64);
-    activeResponseAudio.onended = () => {
-      activeResponseAudio = null;
+    while (responseSpeechQueue.length) {
+      const job = responseSpeechQueue.shift();
+      if (!job || job.epoch !== responseSpeechEpoch) continue;
+      setStopResponseVisible(true);
+      let base64 = job.audioBase64;
+      if (!base64 && job.text) {
+        activeSpeechFetchAbort = new AbortController();
+        try {
+          const res = await postJSON(
+            "/speak",
+            { text: job.text },
+            { signal: activeSpeechFetchAbort.signal },
+          );
+          base64 = res && res.audio_b64;
+        } catch (error) {
+          if (!wasAborted(error)) {
+            // Keep the written reply when speech synthesis is unavailable.
+          }
+        } finally {
+          activeSpeechFetchAbort = null;
+        }
+      }
+      if (base64 && job.epoch === responseSpeechEpoch) {
+        await playReplyAudio(base64, job.epoch);
+      }
+    }
+  } finally {
+    responseSpeechQueueRunning = false;
+    if (!activeResponseAbort && !activeResponseAudio && !responseSpeechQueue.length) {
       setStopResponseVisible(false);
-    };
-    setStopResponseVisible(true);
-    activeResponseAudio.play().catch(() => {
-      // Autoplay can be blocked until the page has been interacted with. Say
-      // so, otherwise the assistant just looks broken.
-      activeResponseAudio = null;
-      setStopResponseVisible(false);
-      toast("Browser ne awaaz block ki — screen par ek baar tap karke dobara try kijiye");
-    });
-  } catch {
-    activeResponseAudio = null;
+    }
   }
 }
 
-function stopActiveAIResponse() {
-  if (activeResponseAbort) activeResponseAbort.abort();
+function playReplyAudio(base64, epoch = responseSpeechEpoch) {
+  return new Promise((resolve) => {
+    if (!base64 || epoch !== responseSpeechEpoch) {
+      resolve();
+      return;
+    }
+    let audio = null;
+    let settled = false;
+    const finish = () => {
+      if (settled) return;
+      settled = true;
+      if (activeResponseAudioResolve === finish) activeResponseAudioResolve = null;
+      if (activeResponseAudio === audio) activeResponseAudio = null;
+      resolve();
+    };
+    try {
+      audio = new Audio("data:audio/mp3;base64," + base64);
+      activeResponseAudio = audio;
+      activeResponseAudioResolve = finish;
+      audio.onended = finish;
+      audio.onerror = finish;
+      setStopResponseVisible(true);
+      audio.play().catch(() => {
+        finish();
+        toast("Browser ne awaaz block ki — screen par ek baar tap karke dobara try kijiye");
+      });
+    } catch {
+      finish();
+    }
+  });
+}
+
+function cancelResponseSpeech() {
+  const hadSpeech = !!(
+    activeResponseAudio || activeSpeechFetchAbort || responseSpeechQueue.length
+  );
+  responseSpeechEpoch += 1;
+  responseSpeechQueue = [];
+  if (activeSpeechFetchAbort) {
+    activeSpeechFetchAbort.abort();
+    activeSpeechFetchAbort = null;
+  }
   if (activeResponseAudio) {
     activeResponseAudio.pause();
     activeResponseAudio.currentTime = 0;
     activeResponseAudio = null;
+  }
+  if (activeResponseAudioResolve) {
+    const resolveCurrent = activeResponseAudioResolve;
+    activeResponseAudioResolve = null;
+    resolveCurrent();
+  }
+  return hadSpeech;
+}
+
+function stopActiveAIResponse() {
+  if (activeResponseAbort) activeResponseAbort.abort();
+  if (cancelResponseSpeech()) {
     addBubble("Voice response stopped. Aap sawaal ko correct karke dobara pooch sakte hain.", "bot");
   }
   setStopResponseVisible(false);
@@ -505,9 +585,8 @@ Khata update karein, reminder banayein, business sawal poochhein, ya handwritten
     button.classList.toggle("on", state.speakReplies);
     button.setAttribute("aria-pressed", String(state.speakReplies));
     button.innerHTML = chatIcon(state.speakReplies ? "speakerOn" : "speakerOff");
-    if (!state.speakReplies && activeResponseAudio) {
-      activeResponseAudio.pause();
-      activeResponseAudio = null;
+    if (!state.speakReplies) {
+      cancelResponseSpeech();
       setStopResponseVisible(false);
     }
     toast(state.speakReplies
@@ -553,7 +632,7 @@ Khata update karein, reminder banayein, business sawal poochhein, ya handwritten
         }, { signal: activeResponseAbort.signal });
         stopBubbleLoading(typing);
         typing.innerHTML = linkify(r.reply);
-        if (r.audio_b64) playReplyAudio(r.audio_b64);
+        if (r.audio_b64) queueReplyAudio(r.audio_b64);
       }
     } catch (error) {
       stopBubbleLoading(typing);
@@ -564,7 +643,9 @@ Khata update karein, reminder banayein, business sawal poochhein, ya handwritten
     finally {
       stopBubbleLoading(typing);
       activeResponseAbort = null;
-      if (!activeResponseAudio) setStopResponseVisible(false);
+      if (!activeResponseAudio && !responseSpeechQueueRunning) {
+        setStopResponseVisible(false);
+      }
       sending = false;
       $("#composerShell").classList.remove("busy");
       $("#log").setAttribute("aria-busy", "false");
@@ -1098,18 +1179,7 @@ async function sendVoice(blob, durationMs = 0) {
       speakText(spokenReply, true);
     } else {
       botSaid.innerHTML = linkify(data.reply || "");
-      if (data.audio_b64) {
-        try {
-          activeResponseAudio = new Audio("data:audio/mp3;base64," + data.audio_b64);
-          activeResponseAudio.onended = () => {
-            activeResponseAudio = null;
-            setStopResponseVisible(false);
-          };
-          await activeResponseAudio.play();
-        } catch {
-          activeResponseAudio = null;
-        }
-      }
+      if (data.audio_b64) queueReplyAudio(data.audio_b64);
     }
   } catch (e) {
     stopBubbleLoading(youSaid);
@@ -1122,7 +1192,9 @@ async function sendVoice(blob, durationMs = 0) {
     stopBubbleLoading(youSaid);
     stopBubbleLoading(botSaid);
     activeResponseAbort = null;
-    if (!activeResponseAudio) setStopResponseVisible(false);
+    if (!activeResponseAudio && !responseSpeechQueueRunning) {
+      setStopResponseVisible(false);
+    }
   }
   $("#log").scrollTop = $("#log").scrollHeight;
   loadData();  // stay in chat

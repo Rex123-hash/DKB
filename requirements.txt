@@ -6,6 +6,7 @@ httpx
 python-dotenv
 python-multipart
 reportlab
+Pillow
 fastembed
 numpy
 faster-whisper

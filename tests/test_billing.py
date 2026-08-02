@@ -892,6 +892,70 @@ def test_amounts_written_with_symbols_or_blanks_survive_the_item_reader():
     assert items[1].unit_price_paise == 120050 and items[1].gst_rate == "12"
 
 
+def test_faint_handwriting_money_pass_fills_rates_and_amounts_by_row():
+    from app.billing.extractors import BillMoneyRead, apply_money_read
+
+    draft = BillDraftData(
+        document_kind="bill",
+        written_grand_total_paise=None,
+        items=[
+            BillItemDraft(name="Rice", quantity="50"),
+            BillItemDraft(
+                name="Rai", quantity="2", unit_price_paise=6000
+            ),
+            BillItemDraft(name="Coconut oil", quantity="20100"),
+        ],
+    )
+    read = BillMoneyRead.model_validate({
+        "items": [
+            {
+                "row_number": 1,
+                "quantity": "50 kg",
+                "unit_price_rupees": "39",
+                "amount_rupees": "1,950",
+            },
+            {
+                "row_number": 2,
+                "quantity": "2",
+                "unit_price_rupees": "999",
+                "amount_rupees": "120",
+            },
+            {
+                "row_number": 3,
+                "quantity": "20",
+                "unit_price_rupees": "35",
+                "amount_rupees": "700",
+            },
+        ],
+        "written_grand_total_rupees": "2,070",
+    })
+
+    apply_money_read(draft, read)
+
+    assert draft.items[0].unit_price_paise == 3900
+    assert draft.items[0].written_total_paise == 195000
+    assert draft.items[1].unit_price_paise == 6000  # first read is authoritative
+    assert draft.items[1].written_total_paise == 12000
+    assert draft.items[2].quantity == "20"  # "20 x 100 ml" is not 20100
+    assert draft.items[2].unit_price_paise == 3500
+    assert draft.written_grand_total_paise == 207000
+
+
+def test_money_read_enhancement_upscales_a_small_scan_losslessly():
+    from io import BytesIO
+    from PIL import Image
+    from app.billing.extractors import enhance_for_money_read
+
+    original = BytesIO()
+    Image.new("RGB", (320, 640), "#d8d8cf").save(original, format="JPEG")
+    enhanced, mime = enhance_for_money_read(original.getvalue(), "image/jpeg")
+
+    with Image.open(BytesIO(enhanced)) as image:
+        assert mime == "image/png"
+        assert image.mode == "L"
+        assert max(image.size) == 1920
+
+
 def test_terms_read_fills_only_what_the_bill_actually_says():
     from app.billing.extractors import BillTermsRead, _apply_terms
 
