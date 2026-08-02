@@ -19,6 +19,15 @@ def test_voice_for_lang_mapping():
 def test_synthesize_empty_text_returns_empty():
     assert voice.synthesize("   ") == b""
 
+def test_internal_recognition_hint_cannot_leak_into_chat():
+    hint = voice.build_hint(["Ramesh", "Suresh", "Verma Traders"])
+    assert voice._clean_transcript(hint, hint) == ""
+    assert voice._clean_transcript("Ramesh ko 500 udhaar likho", hint) == (
+        "Ramesh ko 500 udhaar likho"
+    )
+
+
+
 
 @pytest.fixture()
 def client(tmp_path, monkeypatch):

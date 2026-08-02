@@ -99,6 +99,16 @@ def build_hint(names: list[str] | None = None) -> str:
     return f"{examples}{roster} Words: {LEDGER_VOCAB}."
 
 
+def _clean_transcript(text: str, hint: str = "") -> str:
+    """Reject an internal recogniser prompt echoed as speech."""
+    text = (text or "").strip()
+    if hint and re.search(r"\bNames:\s*.+\bWords:\s*", text, re.I | re.S):
+        return ""
+    return text
+
+
+
+
 def _use_groq() -> bool:
     """Pick the speech-to-text backend.
 
@@ -168,13 +178,8 @@ def _gcp_transcribe(audio_bytes: bytes, hint: str = "") -> dict:
         for code in os.environ.get("GCP_STT_LANGUAGE_CODES", "hi-IN,en-IN").split(",")
         if code.strip()
     ]
+    # Chirp can repeat a long custom prompt on quiet or clipped recordings.
     features = None
-    if hint:
-        features = cloud_speech.RecognitionFeatures(
-            custom_prompt_config=cloud_speech.CustomPromptConfig(
-                custom_prompt=hint[:4000]
-            )
-        )
     recognition_config = cloud_speech.RecognitionConfig(
         auto_decoding_config=cloud_speech.AutoDetectDecodingConfig(),
         language_codes=language_codes or ["auto"],
@@ -197,7 +202,10 @@ def _gcp_transcribe(audio_bytes: bytes, hint: str = "") -> dict:
             texts.append(result.alternatives[0].transcript)
         if getattr(result, "language_code", None):
             detected = result.language_code
-    return {"text": " ".join(texts).strip(), "lang": _norm_lang(detected)}
+    return {
+        "text": _clean_transcript(" ".join(texts), hint),
+        "lang": _norm_lang(detected),
+    }
 
 
 def _local_transcribe(audio_bytes: bytes, filename: str, hint: str = "") -> dict:
