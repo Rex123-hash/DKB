@@ -639,12 +639,17 @@ async function scanBillInChat(file) {
       return;
     }
     setActiveDraft(draft.id);
-    typing.textContent = draft.duplicate
-      ? "I found the same saved scan, so I reopened it without creating a duplicate."
+    typing.textContent = (draft.duplicate && !draft.reprocessed)
+      ? "Yehi scan pehle se saved tha, wahi khol diya."
       : billAssistantReply(draft);
     appendDraftCard(draft);
   } catch (e) {
-    typing.textContent = "I could not read this image. Please use a clear JPEG, PNG, or WebP photo and try again.";
+    // A busy or slow AI service is not an unreadable bill. Saying so sends the
+    // shopkeeper off to re-photograph a photo that was fine.
+    const detail = String((e && e.message) || "");
+    typing.textContent = /extraction failed|502|429|timeout|timed out/i.test(detail)
+      ? "AI service abhi busy hai, bill padha nahi ja saka. Thodi der baad dobara bhejiye — photo theek hai."
+      : "Ye image padhi nahi ja saki. Saaf JPEG, PNG ya WebP photo bhejiye jisme poora bill dikhe.";
   }
 }
 

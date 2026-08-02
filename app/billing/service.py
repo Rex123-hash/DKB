@@ -5,6 +5,7 @@ import hashlib
 import os
 import re
 import uuid
+from io import BytesIO
 from pathlib import Path
 
 from app.billing import repository
@@ -45,6 +46,58 @@ def scan_directory() -> Path:
     return Path(os.environ.get("DUKANBOOK_SCAN_DIR", DEFAULT_SCAN_DIR))
 
 
+VISION_MAX_EDGE = int(os.environ.get("BILL_VISION_MAX_EDGE", "1600"))
+
+
+def prepare_for_vision(image_bytes: bytes, mime_type: str) -> tuple[bytes, str]:
+    """Shrink an oversized photo before it is sent to the model.
+
+    A modern phone photo is far larger than any bill reader needs. Sending it
+    whole costs tokens and seconds and is a common cause of read timeouts. The
+    original is still what gets stored and shown to the shopkeeper.
+    """
+    try:
+        from PIL import Image
+    except ImportError:
+        return image_bytes, mime_type
+    try:
+        with Image.open(BytesIO(image_bytes)) as image:
+            if max(image.size) <= VISION_MAX_EDGE:
+                return image_bytes, mime_type
+            image = image.convert("RGB")
+            image.thumbnail((VISION_MAX_EDGE, VISION_MAX_EDGE), Image.LANCZOS)
+            buffer = BytesIO()
+            image.save(buffer, format="JPEG", quality=88, optimize=True)
+    except Exception:
+        # Never let preprocessing stop a scan; the original still works.
+        return image_bytes, mime_type
+    return buffer.getvalue(), "image/jpeg"
+
+
+_ANSWERABLE_FIELDS = (
+    "bill_type", "bill_number", "bill_date", "gst_mode", "gst_rate",
+    "tax_scheme", "payment_status", "paid_amount_paise", "note",
+)
+
+
+def _merge_over_answers(
+    existing: BillDraftData, fresh: BillDraftData
+) -> BillDraftData:
+    """Keep everything already known, and let the re-read fill only the gaps."""
+    merged = fresh.model_copy(deep=True)
+    for field in _ANSWERABLE_FIELDS:
+        current = getattr(existing, field, None)
+        if current not in (None, ""):
+            setattr(merged, field, current)
+    for part in ("name", "phone", "gstin"):
+        current = getattr(existing.party, part, None)
+        if current not in (None, ""):
+            setattr(merged.party, part, current)
+    if existing.items and not merged.items:
+        merged.items = [item.model_copy(deep=True) for item in existing.items]
+    return merged
+
+
 def scan_bill(
     conn,
     *,
@@ -80,26 +133,38 @@ def scan_bill(
                     normalized,
                     backend=provider.name,
                 )
+        cached_data = duplicate.get("data") or {}
+        cached_kind = cached_data.get("document_kind")
         if (
             duplicate["status"] != "finalized"
             and (
-                duplicate.get("data", {}).get("document_kind") is None
+                cached_kind is None
                 or (
-                    duplicate.get("data", {}).get("document_kind") == "bill"
+                    cached_kind == "bill"
                     and provider_version is not None
-                    and duplicate.get("data", {}).get("extractor_version")
-                    != provider_version
+                    and cached_data.get("extractor_version") != provider_version
                 )
+                # A bill we failed to read any rows from is not worth serving
+                # again. Re-uploading it is the shopkeeper asking us to retry.
+                or (cached_kind == "bill" and not cached_data.get("items"))
             )
         ):
             repository.set_draft_status(
                 conn, duplicate["id"], "extracting", backend=provider.name
             )
             try:
+                vision_bytes, vision_mime = prepare_for_vision(
+                    image_bytes, mime_type
+                )
                 data = remove_empty_items(
-                    provider.extract(image_bytes, mime_type, filename)
+                    provider.extract(vision_bytes, vision_mime, filename)
                 )
                 data.extractor_version = provider_version
+                # A re-read must never discard what the shopkeeper already
+                # told us; their confirmed answers outrank a fresh guess.
+                data = _merge_over_answers(
+                    BillDraftData.model_validate(cached_data), data
+                )
                 refreshed = repository.save_draft_data(
                     conn, duplicate["id"], data, backend=provider.name
                 )
@@ -138,8 +203,9 @@ def scan_bill(
         conn, draft_id, "extracting", backend=provider.name
     )
     try:
+        vision_bytes, vision_mime = prepare_for_vision(image_bytes, mime_type)
         data = remove_empty_items(
-            provider.extract(image_bytes, mime_type, filename)
+            provider.extract(vision_bytes, vision_mime, filename)
         )
         data.extractor_version = provider_version
         result = repository.save_draft_data(

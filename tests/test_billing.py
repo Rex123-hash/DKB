@@ -691,16 +691,18 @@ def test_mixed_item_gst_rates_are_not_collapsed_into_one_rate():
     assert draft.gst_rate is None
 
 
-def test_bill_with_several_gst_rates_warns_before_one_rate_is_applied():
+def test_several_gst_rates_are_calculated_rather_than_refused():
+    """Each row keeps its own rate; the bill is no longer blocked."""
     calc = validate_bill(_draft(
-        gst_mode="gst", gst_rate="5", tax_scheme="cgst_sgst",
+        gst_mode="gst", gst_rate=None, tax_scheme="cgst_sgst",
         items=[
             {"name": "Rice", "quantity": "2", "unit_price_paise": 5000, "gst_rate": "5"},
             {"name": "Soap", "quantity": "1", "unit_price_paise": 3000, "gst_rate": "12"},
         ],
     ))
-    warning = next(w for w in calc.warnings if w.code == "mixed_gst_rates")
-    assert warning.severity == "error"
+    assert not [w for w in calc.warnings if w.severity == "error"]
+    assert calc.gst_paise == 500 + 360          # 5% of 100.00, 12% of 30.00
+    assert {line.rate for line in calc.tax_lines} == {"5", "12"}
 
 
 def test_a_corrupted_phone_read_is_dropped_rather_than_stored():
@@ -756,3 +758,121 @@ def test_grand_total_is_not_disputed_while_the_gst_rate_is_unknown():
         items=[{"name": "Rice", "quantity": "30", "unit_price_paise": 40000}],
     ))
     assert not [w for w in calc.warnings if w.code == "grand_total_mismatch"]
+
+
+def test_each_line_is_taxed_at_its_own_gst_rate():
+    """Real kirana bills mix 5%, 12% and 18% on one invoice."""
+    calc = validate_bill(_draft(
+        gst_mode="gst", tax_scheme="cgst_sgst",
+        items=[
+            {"name": "Rice", "quantity": "30", "unit_price_paise": 40000, "gst_rate": "5"},
+            {"name": "Oil", "quantity": "3", "unit_price_paise": 18000, "gst_rate": "5"},
+            {"name": "Toothpaste", "quantity": "1", "unit_price_paise": 10000, "gst_rate": "12"},
+        ],
+    ))
+    assert not calc.missing_fields
+    assert not [w for w in calc.warnings if w.severity == "error"]
+    assert calc.subtotal_paise == 1264000                 # 12000 + 540 + 100
+    # 5% on 12540 = 627.00, 12% on 100 = 12.00
+    assert calc.gst_paise == 62700 + 1200
+    assert calc.cgst_paise + calc.sgst_paise == calc.gst_paise
+    assert calc.grand_total_paise == 1264000 + 63900
+
+
+def test_tax_is_summarised_per_rate_for_the_invoice():
+    calc = validate_bill(_draft(
+        gst_mode="gst", tax_scheme="cgst_sgst",
+        items=[
+            {"name": "Rice", "quantity": "30", "unit_price_paise": 40000, "gst_rate": "5"},
+            {"name": "Toothpaste", "quantity": "1", "unit_price_paise": 10000, "gst_rate": "12"},
+        ],
+    ))
+    rates = {line.rate: line for line in calc.tax_lines}
+    assert set(rates) == {"5", "12"}
+    assert rates["5"].taxable_paise == 1200000
+    assert rates["5"].cgst_paise + rates["5"].sgst_paise == 60000
+    assert rates["12"].taxable_paise == 10000
+
+
+def test_a_bill_discount_is_shared_across_rates_without_losing_a_paisa():
+    calc = validate_bill(_draft(
+        gst_mode="gst", tax_scheme="cgst_sgst", discount_paise=10000,
+        items=[
+            {"name": "Rice", "quantity": "1", "unit_price_paise": 100000, "gst_rate": "5"},
+            {"name": "Soap", "quantity": "1", "unit_price_paise": 100000, "gst_rate": "12"},
+        ],
+    ))
+    assert sum(line.taxable_paise for line in calc.tax_lines) == calc.taxable_paise
+    assert sum(line.gst_paise for line in calc.tax_lines) == calc.gst_paise
+
+
+def test_a_bill_level_rate_still_covers_rows_that_carry_none():
+    calc = validate_bill(_draft(
+        gst_mode="gst", gst_rate="18", tax_scheme="igst",
+        items=[{"name": "Rice", "quantity": "2", "unit_price_paise": 50000}],
+    ))
+    assert calc.igst_paise == 18000 and calc.gst_paise == 18000
+
+
+def test_a_rate_is_still_required_when_no_row_carries_one():
+    calc = validate_bill(_draft(
+        gst_mode="gst", gst_rate=None, tax_scheme="cgst_sgst",
+        items=[{"name": "Rice", "quantity": "2", "unit_price_paise": 50000}],
+    ))
+    assert "gst_rate" in calc.missing_fields
+
+
+def test_invoice_declares_each_gst_slab_separately():
+    from app.billing.pdf import build_totals_rows, build_bill_pdf
+
+    conn = _conn()
+    bill = repository.finalize_draft(conn, _saved_draft(conn, _draft(
+        gst_mode="gst", gst_rate=None, tax_scheme="cgst_sgst",
+        items=[
+            {"name": "Rice", "quantity": "30", "unit_price_paise": 40000, "gst_rate": "5"},
+            {"name": "Toothpaste", "quantity": "1", "unit_price_paise": 10000, "gst_rate": "12"},
+        ],
+    )))
+    rows = build_totals_rows(bill)
+    labels = [row["label"] for row in rows]
+    assert "CGST @ 2.5%" in labels and "CGST @ 6%" in labels
+    ladder = sum(row["paise"] for row in rows if row["kind"] == "ladder")
+    grand = next(row for row in rows if row["kind"] == "grand")
+    assert ladder == grand["paise"] == bill["grand_total_paise"]
+    assert build_bill_pdf(bill).startswith(b"%PDF")
+
+
+def test_reuploading_a_bill_we_could_not_read_retries_instead_of_caching_it(tmp_path, monkeypatch):
+    """A cached zero-item draft must never be served back as the final word."""
+    monkeypatch.setenv("DUKANBOOK_SCAN_DIR", str(tmp_path))
+    conn = _conn()
+    image = b"\x89PNG\r\n\x1a\n" + b"0" * 64
+
+    blind = FakeBillExtractor(BillDraftData(document_kind="bill"))
+    first = service.scan_bill(conn, image_bytes=image, filename="b.png",
+                              mime_type="image/png", session_id="s", extractor=blind)
+    assert first["data"]["items"] == []
+
+    seeing = FakeBillExtractor(_draft())
+    second = service.scan_bill(conn, image_bytes=image, filename="b.png",
+                               mime_type="image/png", session_id="s", extractor=seeing)
+    assert second["id"] == first["id"] and second["reprocessed"] is True
+    assert [item["name"] for item in second["data"]["items"]] == ["Rice"]
+
+
+def test_a_retry_keeps_the_answers_the_shopkeeper_already_gave(tmp_path, monkeypatch):
+    monkeypatch.setenv("DUKANBOOK_SCAN_DIR", str(tmp_path))
+    conn = _conn()
+    image = b"\x89PNG\r\n\x1a\n" + b"1" * 64
+
+    blind = FakeBillExtractor(BillDraftData(document_kind="bill"))
+    draft = service.scan_bill(conn, image_bytes=image, filename="b.png",
+                              mime_type="image/png", session_id="s", extractor=blind)
+    service.answer_draft(conn, draft["id"], "purchase bill", extractor=blind)
+
+    # The re-read sees a sale; the shopkeeper already said purchase.
+    seeing = FakeBillExtractor(_draft(bill_type="sale", party={"name": "Someone Else"}))
+    again = service.scan_bill(conn, image_bytes=image, filename="b.png",
+                              mime_type="image/png", session_id="s", extractor=seeing)
+    assert again["data"]["bill_type"] == "purchase"
+    assert [item["name"] for item in again["data"]["items"]] == ["Rice"]

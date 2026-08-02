@@ -93,6 +93,45 @@ def _rate_text(raw: object) -> str:
     return format(rate.normalize(), "f")
 
 
+def _tax_slabs(bill: dict) -> list[dict]:
+    """Rebuild the per-rate tax summary from the stored bill items."""
+    if bill["gst_mode"] != "gst":
+        return []
+    is_igst = int(bill.get("igst_paise") or 0) > 0
+    bases: dict[str, int] = {}
+    for item in bill.get("items") or []:
+        rate = _rate_text(item.get("gst_rate") or bill.get("gst_rate"))
+        if rate in ("", "0"):
+            continue
+        bases[rate] = bases.get(rate, 0) + int(item["line_total_paise"])
+    if not bases:
+        return []
+
+    # Scale to the bill's taxable value so a discount is reflected, then take
+    # the remainder on the last slab to match the stored total exactly.
+    gross = sum(bases.values())
+    taxable = int(bill["taxable_paise"])
+    slabs: list[dict] = []
+    for index, (rate, base) in enumerate(sorted(bases.items(), key=lambda kv: Decimal(kv[0]))):
+        share = (
+            taxable - sum(slab["taxable_paise"] for slab in slabs)
+            if index == len(bases) - 1
+            else int(Decimal(taxable) * Decimal(base) / Decimal(gross))
+        )
+        gst = int(
+            (Decimal(share) * Decimal(rate) / Decimal(100)).quantize(
+                Decimal("1"), rounding=ROUND_HALF_UP
+            )
+        )
+        cgst = 0 if is_igst else gst // 2
+        slabs.append({
+            "rate": rate, "taxable_paise": share, "gst_paise": gst,
+            "cgst_paise": cgst, "sgst_paise": 0 if is_igst else gst - cgst,
+            "igst_paise": gst if is_igst else 0,
+        })
+    return slabs
+
+
 def build_totals_rows(bill: dict) -> list[dict]:
     """The invoice money ladder.
 
@@ -119,18 +158,33 @@ def build_totals_rows(bill: dict) -> list[dict]:
         )
 
     if bill["gst_mode"] == "gst":
-        rate = _rate_text(bill.get("gst_rate"))
-        half = _rate_text(
-            (Decimal(rate) / 2) if rate not in ("", "0") else Decimal("0")
-        )
         cgst = int(bill.get("cgst_paise") or 0)
         sgst = int(bill.get("sgst_paise") or 0)
         igst = int(bill.get("igst_paise") or 0)
-        if igst:
-            rows.append({"label": f"IGST @ {rate}%", "paise": igst, "kind": "ladder"})
+        slabs = _tax_slabs(bill)
+        if len(slabs) > 1:
+            # A bill that mixes rates must declare each slab separately.
+            for slab in slabs:
+                half = _rate_text(Decimal(slab["rate"]) / 2)
+                if igst:
+                    rows.append({
+                        "label": f"IGST @ {slab['rate']}%",
+                        "paise": slab["igst_paise"], "kind": "ladder"})
+                else:
+                    rows.append({
+                        "label": f"CGST @ {half}%",
+                        "paise": slab["cgst_paise"], "kind": "ladder"})
+                    rows.append({
+                        "label": f"SGST @ {half}%",
+                        "paise": slab["sgst_paise"], "kind": "ladder"})
         else:
-            rows.append({"label": f"CGST @ {half}%", "paise": cgst, "kind": "ladder"})
-            rows.append({"label": f"SGST @ {half}%", "paise": sgst, "kind": "ladder"})
+            rate = slabs[0]["rate"] if slabs else _rate_text(bill.get("gst_rate"))
+            half = _rate_text(Decimal(rate) / 2 if rate else Decimal("0"))
+            if igst:
+                rows.append({"label": f"IGST @ {rate}%", "paise": igst, "kind": "ladder"})
+            else:
+                rows.append({"label": f"CGST @ {half}%", "paise": cgst, "kind": "ladder"})
+                rows.append({"label": f"SGST @ {half}%", "paise": sgst, "kind": "ladder"})
 
     round_off = int(bill.get("round_off_paise") or 0)
     if round_off:

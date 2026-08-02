@@ -8,6 +8,7 @@ from __future__ import annotations
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 
 from app.billing.models import (
+    TaxLine,
     BillCalculation,
     BillDraftData,
     DraftWarning,
@@ -47,6 +48,113 @@ def _matches_tax_inclusive(draft: BillDraftData, item, line_total: int) -> bool:
     inclusive = _round_paise(Decimal(line_total) * (Decimal(100) + rate) / Decimal(100))
     # One paisa of slack absorbs the rounding the printer applied.
     return abs(item.written_total_paise - inclusive) <= 1
+
+
+def _apportion(amount: int, weights: list[int]) -> list[int]:
+    """Split `amount` across `weights` so the parts sum back to it exactly.
+
+    Largest-remainder, so a bill-level discount spread over several tax slabs
+    never loses or invents a paisa.
+    """
+    total = sum(weights)
+    if amount == 0 or total <= 0:
+        return [0] * len(weights)
+    shares, remainders = [], []
+    for weight in weights:
+        exact = Decimal(amount) * Decimal(weight) / Decimal(total)
+        floor = int(exact.to_integral_value(rounding="ROUND_FLOOR"))
+        shares.append(floor)
+        remainders.append(exact - floor)
+    leftover = amount - sum(shares)
+    for index in sorted(range(len(shares)), key=lambda i: remainders[i], reverse=True):
+        if leftover <= 0:
+            break
+        shares[index] += 1
+        leftover -= 1
+    return shares
+
+
+def _apply_gst(draft: BillDraftData, calc: BillCalculation, taxable: int) -> None:
+    """Tax every line at its own rate and summarise the bill per rate slab.
+
+    A kirana bill routinely mixes 5%, 12% and 18%. Applying one rate to the
+    whole bill would post a wrong total, so each line carries its own and the
+    bill-level discount and charges are shared across the slabs in proportion.
+    """
+    bill_rate = _decimal(draft.gst_rate)
+    rated: list[tuple[str, int]] = []
+    for index, line in enumerate(calc.lines):
+        if line.calculated_total_paise is None:
+            continue
+        raw = (draft.items[index].gst_rate or "").strip() or draft.gst_rate
+        rate = _decimal(raw)
+        if rate is None or rate < 0:
+            calc.missing_fields.append("gst_rate")
+            return
+        if rate > 100:
+            calc.warnings.append(
+                DraftWarning(
+                    code="invalid_gst_rate",
+                    field="gst_rate",
+                    severity="error",
+                    message="GST rate must be between 0 and 100 percent.",
+                )
+            )
+            return
+        rated.append((format(rate.normalize(), "f"), line.calculated_total_paise))
+
+    if not rated:
+        if bill_rate is None or bill_rate < 0:
+            calc.missing_fields.append("gst_rate")
+        elif bill_rate > 100:
+            calc.warnings.append(
+                DraftWarning(
+                    code="invalid_gst_rate",
+                    field="gst_rate",
+                    severity="error",
+                    message="GST rate must be between 0 and 100 percent.",
+                )
+            )
+        else:
+            calc.gst_paise = _round_paise(Decimal(taxable) * bill_rate / Decimal(100))
+        _split_scheme(draft, calc)
+        return
+
+    # Share the bill-level discount and extra charge over the slabs by value,
+    # so each slab is taxed on the amount actually payable for it.
+    bases = [amount for _, amount in rated]
+    adjustment = taxable - sum(bases)
+    shares = _apportion(abs(adjustment), bases)
+    sign = 1 if adjustment >= 0 else -1
+
+    slabs: dict[str, TaxLine] = {}
+    for (rate_text, amount), share in zip(rated, shares, strict=True):
+        slab = slabs.setdefault(rate_text, TaxLine(rate=rate_text))
+        slab.taxable_paise += amount + sign * share
+
+    for slab in slabs.values():
+        slab.gst_paise = _round_paise(
+            Decimal(slab.taxable_paise) * Decimal(slab.rate) / Decimal(100)
+        )
+        if draft.tax_scheme == "igst":
+            slab.igst_paise = slab.gst_paise
+        else:
+            slab.cgst_paise = slab.gst_paise // 2
+            slab.sgst_paise = slab.gst_paise - slab.cgst_paise
+
+    calc.tax_lines = sorted(slabs.values(), key=lambda s: Decimal(s.rate))
+    calc.gst_paise = sum(slab.gst_paise for slab in calc.tax_lines)
+    calc.cgst_paise = sum(slab.cgst_paise for slab in calc.tax_lines)
+    calc.sgst_paise = sum(slab.sgst_paise for slab in calc.tax_lines)
+    calc.igst_paise = sum(slab.igst_paise for slab in calc.tax_lines)
+
+
+def _split_scheme(draft: BillDraftData, calc: BillCalculation) -> None:
+    if draft.tax_scheme == "cgst_sgst":
+        calc.cgst_paise = calc.gst_paise // 2
+        calc.sgst_paise = calc.gst_paise - calc.cgst_paise
+    elif draft.tax_scheme == "igst":
+        calc.igst_paise = calc.gst_paise
 
 
 def validate_bill(draft: BillDraftData) -> BillCalculation:
@@ -209,48 +317,9 @@ def validate_bill(draft: BillDraftData) -> BillCalculation:
     calc.taxable_paise = taxable
 
     if draft.gst_mode == "gst":
-        item_rates = {
-            (item.gst_rate or "").strip()
-            for item in draft.items
-            if (item.gst_rate or "").strip()
-        }
-        if len(item_rates) > 1:
-            # One rate cannot represent a bill whose rows are taxed differently,
-            # and silently applying one would post a wrong total.
-            calc.warnings.append(
-                DraftWarning(
-                    code="mixed_gst_rates",
-                    field="gst_rate",
-                    severity="error",
-                    message=(
-                        "This bill has more than one GST rate ("
-                        + ", ".join(f"{rate}%" for rate in sorted(item_rates))
-                        + "). Split it into one bill per rate, or set the "
-                        "single rate that applies."
-                    ),
-                )
-            )
-        rate = _decimal(draft.gst_rate)
-        if rate is None or rate < 0:
-            calc.missing_fields.append("gst_rate")
-        elif rate > 100:
-            calc.warnings.append(
-                DraftWarning(
-                    code="invalid_gst_rate",
-                    field="gst_rate",
-                    severity="error",
-                    message="GST rate must be between 0 and 100 percent.",
-                )
-            )
-        else:
-            calc.gst_paise = _round_paise(Decimal(taxable) * rate / Decimal(100))
+        _apply_gst(draft, calc, taxable)
         if draft.tax_scheme is None:
             calc.missing_fields.append("tax_scheme")
-        elif draft.tax_scheme == "cgst_sgst":
-            calc.cgst_paise = calc.gst_paise // 2
-            calc.sgst_paise = calc.gst_paise - calc.cgst_paise
-        elif draft.tax_scheme == "igst":
-            calc.igst_paise = calc.gst_paise
 
     calc.grand_total_paise = (
         calc.taxable_paise + calc.gst_paise + draft.round_off_paise
@@ -265,9 +334,8 @@ def validate_bill(draft: BillDraftData) -> BillCalculation:
             )
         )
 
-    gst_is_undecided = draft.gst_mode == "gst" and (
-        "gst_rate" in calc.missing_fields
-        or any(warning.code == "mixed_gst_rates" for warning in calc.warnings)
+    gst_is_undecided = (
+        draft.gst_mode == "gst" and "gst_rate" in calc.missing_fields
     )
     if (
         draft.written_grand_total_paise is not None

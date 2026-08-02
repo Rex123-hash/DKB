@@ -393,7 +393,7 @@ class FakeBillExtractor:
 
 class OllamaBillExtractor:
     name = "ollama"
-    version = "ollama-v3-header-and-batched-questions"
+    version = "ollama-v4-item-pass"
 
     def __init__(
         self,
@@ -533,7 +533,7 @@ class GeminiBillExtractor:
     """High-accuracy multimodal extractor using the configured Gemini key."""
 
     name = "gemini"
-    version = "gemini-v1-structured-vision"
+    version = "gemini-v2-structured-vision-item-pass"
 
     def __init__(self, model: str | None = None, timeout: float | None = None):
         self.model = model or os.environ.get(
@@ -654,7 +654,7 @@ class VertexBillExtractor:
     """
 
     name = "vertex"
-    version = "vertex-gemini-document-ai-v1"
+    version = "vertex-gemini-document-ai-v2-item-pass"
 
     def _request(
         self,

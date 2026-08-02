@@ -42,6 +42,38 @@ def access_token() -> str:
     return str(credentials.token)
 
 
+_RETRY_STATUSES = {429, 500, 502, 503, 504}
+
+
+def _post_with_retry(url: str, *, attempts: int = 3, **kwargs):
+    """POST with short backoff on rate limits, outages, and read timeouts.
+
+    Bill scanning is interactive: a shared-quota 429 or a slow read should cost
+    a couple of seconds, not force the shopkeeper to photograph the bill again.
+    """
+    import time
+
+    delay = 2.0
+    last_error: Exception | None = None
+    for attempt in range(attempts):
+        try:
+            response = requests.post(url, **kwargs)
+        except (requests.Timeout, requests.ConnectionError) as exc:
+            last_error = exc
+        else:
+            if response.status_code not in _RETRY_STATUSES:
+                return response
+            last_error = None
+            if attempt == attempts - 1:
+                return response
+        if attempt < attempts - 1:
+            time.sleep(delay)
+            delay *= 2
+    if last_error is not None:
+        raise last_error
+    raise RuntimeError("request failed after retries")
+
+
 def vertex_openai_provider() -> tuple[str, str, dict[str, str], float]:
     """OpenAI-compatible Vertex endpoint used by the existing tool loop."""
     location = os.environ.get("GCP_VERTEX_LOCATION", "global").strip() or "global"
@@ -75,7 +107,7 @@ def vertex_generate_content(
         f"{project_id()}/locations/{location}/publishers/google/models/"
         f"{model}:generateContent"
     )
-    response = requests.post(
+    response = _post_with_retry(
         endpoint,
         headers={
             "Authorization": f"Bearer {access_token()}",
@@ -111,23 +143,26 @@ def document_ai_ocr(image_bytes: bytes, mime_type: str) -> str:
     if not processor_id:
         return ""
 
-    from google.api_core.client_options import ClientOptions
-    from google.cloud import documentai
+    # Called over REST with the same ADC token as Vertex, so the deployed image
+    # does not have to carry the google-cloud-documentai client library.
+    import base64
 
     location = os.environ.get("GCP_DOCUMENT_AI_LOCATION", "us").strip() or "us"
-    client = documentai.DocumentProcessorServiceClient(
-        client_options=ClientOptions(
-            api_endpoint=f"{location}-documentai.googleapis.com"
-        )
+    response = requests.post(
+        f"https://{location}-documentai.googleapis.com/v1/projects/"
+        f"{project_id()}/locations/{location}/processors/{processor_id}:process",
+        headers={
+            "Authorization": f"Bearer {access_token()}",
+            "Content-Type": "application/json",
+        },
+        json={
+            "skipHumanReview": True,
+            "rawDocument": {
+                "content": base64.b64encode(image_bytes).decode("ascii"),
+                "mimeType": mime_type,
+            },
+        },
+        timeout=float(os.environ.get("GCP_DOCUMENT_AI_TIMEOUT", "60")),
     )
-    name = client.processor_path(project_id(), location, processor_id)
-    result = client.process_document(
-        request=documentai.ProcessRequest(
-            name=name,
-            raw_document=documentai.RawDocument(
-                content=image_bytes,
-                mime_type=mime_type,
-            ),
-        )
-    )
-    return (result.document.text or "").strip()
+    response.raise_for_status()
+    return (response.json().get("document", {}).get("text") or "").strip()

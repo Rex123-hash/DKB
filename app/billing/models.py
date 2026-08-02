@@ -101,8 +101,20 @@ class LineCalculation(BaseModel):
     calculated_total_paise: int | None
 
 
+class TaxLine(BaseModel):
+    """One GST rate slab on a bill, as an Indian tax invoice must declare it."""
+
+    rate: str
+    taxable_paise: int = 0
+    gst_paise: int = 0
+    cgst_paise: int = 0
+    sgst_paise: int = 0
+    igst_paise: int = 0
+
+
 class BillCalculation(BaseModel):
     lines: list[LineCalculation] = Field(default_factory=list)
+    tax_lines: list[TaxLine] = Field(default_factory=list)
     subtotal_paise: int = 0
     discount_paise: int = 0
     extra_charge_paise: int = 0
