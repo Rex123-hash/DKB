@@ -471,29 +471,33 @@ Khata update karein, reminder banayein, business sawal poochhein, ya handwritten
     setStopResponseVisible(true);
     addBubble(msg, "user"); box.value = ""; box.focus();
     syncComposer();
-    const typing = addBubble("…", "bot");
-    typing.classList.add("typing");
+    const typing = addBubble("", "bot");
+    setBubbleLoading(typing, "Thinking");
     try {
       if (state.activeDraftId) {
         if (/^(cancel|exit|stop).*(bill)?$/i.test(msg)) {
           clearActiveDraft();
+          stopBubbleLoading(typing);
           typing.textContent = "Bill mode closed. The draft is still saved in Bills history for later review.";
         } else {
           const draft = await postJSON(`/bill-drafts/${state.activeDraftId}/answer`, { answer: msg }, { signal: activeResponseAbort.signal });
+          stopBubbleLoading(typing);
           typing.textContent = billAssistantReply(draft);
           appendDraftCard(draft);
         }
       } else {
         const r = await postJSON("/chat", { message: msg, session_id: state.sessionId }, { signal: activeResponseAbort.signal });
+        stopBubbleLoading(typing);
         typing.innerHTML = linkify(r.reply);
       }
     } catch (error) {
+      stopBubbleLoading(typing);
       typing.textContent = wasAborted(error)
         ? "Response stopped. Aap mujhe correct karke dobara pooch sakte hain."
         : "Backend se baat nahi ho payi. Please try again.";
     }
     finally {
-      typing.classList.remove("typing");
+      stopBubbleLoading(typing);
       activeResponseAbort = null;
       if (!activeResponseAudio) setStopResponseVisible(false);
       sending = false;
@@ -550,6 +554,18 @@ function addBubble(text, who) {
   content.appendChild(b); content.appendChild(meta); row.appendChild(content);
   $("#log").appendChild(row); $("#log").scrollTop = $("#log").scrollHeight;
   return b;
+}
+
+
+function setBubbleLoading(bubble, label) {
+  bubble.classList.add("loading");
+  bubble.setAttribute("aria-busy", "true");
+  bubble.innerHTML = `<span class="chat-loader" aria-hidden="true"></span><span>${esc(label)}</span>`;
+}
+
+function stopBubbleLoading(bubble) {
+  bubble.classList.remove("loading");
+  bubble.removeAttribute("aria-busy");
 }
 
 function openBillScannerInChat() {
@@ -876,9 +892,10 @@ async function toggleMic(btn) {
   } catch { toast("Mic access nahi mila"); }
 }
 async function sendVoice(blob, durationMs = 0) {
-  const youSaid = addBubble("…", "user");
-  youSaid.innerHTML = `${chatIcon("mic")} …`;
-  const botSaid = addBubble("…", "bot");
+  const youSaid = addBubble("", "user");
+  setBubbleLoading(youSaid, "Processing voice");
+  const botSaid = addBubble("", "bot");
+  setBubbleLoading(botSaid, "Understanding");
   activeResponseAbort = new AbortController();
   setStopResponseVisible(true);
   try {
@@ -894,7 +911,9 @@ async function sendVoice(blob, durationMs = 0) {
     const data = await res.json();
     const transcript = typeof data.transcript === "object"
       ? data.transcript.text : data.transcript;
-    youSaid.innerHTML = `${chatIcon("mic")} ${esc(transcript || "…")}`;
+    stopBubbleLoading(youSaid);
+    youSaid.innerHTML = `${chatIcon("mic")} ${esc(transcript || "Voice not detected")}`;
+    stopBubbleLoading(botSaid);
     if (state.activeDraftId) {
       const draft = data.draft;
       botSaid.textContent = billAssistantReply(draft);
@@ -915,10 +934,15 @@ async function sendVoice(blob, durationMs = 0) {
       }
     }
   } catch (e) {
+    stopBubbleLoading(youSaid);
+    youSaid.innerHTML = `${chatIcon("mic")} Voice not detected`;
+    stopBubbleLoading(botSaid);
     botSaid.textContent = wasAborted(e)
       ? "Voice response stopped."
       : "Voice error — phir se boliye.";
   } finally {
+    stopBubbleLoading(youSaid);
+    stopBubbleLoading(botSaid);
     activeResponseAbort = null;
     if (!activeResponseAudio) setStopResponseVisible(false);
   }

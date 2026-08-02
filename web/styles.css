@@ -197,9 +197,10 @@ body{
 .bubble.bot{background:#fff;color:#243638;border:1px solid #e4eded;border-bottom-left-radius:5px}
 .bubble.bot b{color:#113f42;font-weight:700}.bubble a{color:inherit;font-weight:600}
 .message-meta{font-size:.58rem;color:#91a1a2;margin:4px 5px 0}
-.bubble.typing{min-width:48px;color:transparent;position:relative}
-.bubble.typing::after{content:"•••";position:absolute;inset:8px 12px;color:var(--brand-dark);letter-spacing:3px;
-  animation:typing 1s ease-in-out infinite}
+.bubble.loading{min-width:118px;display:inline-flex;align-items:center;gap:8px;font-weight:600;color:var(--brand-deep)}
+.chat-loader{width:14px;height:14px;flex:0 0 auto;border:2px solid rgba(15,164,169,.22);
+  border-top-color:var(--brand);border-radius:50%;animation:spin .72s linear infinite}
+.bubble.user .chat-loader{border-color:rgba(255,255,255,.35);border-top-color:#fff}
 .quick-actions{display:flex;gap:7px;flex-wrap:wrap;margin:2px 0 4px 35px}
 .quick-actions button{display:flex;align-items:center;gap:6px;border:1px solid #d5e9e9;background:#fff;color:#315a5c;
   border-radius:999px;padding:7px 10px;font:600 .68rem/1 'Poppins',sans-serif;cursor:pointer;

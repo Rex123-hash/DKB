@@ -23,7 +23,7 @@ _OK = {"ok", "okay", "okie", "theek", "thik", "acha", "achha", "hmm", "hmmm"}
 
 _REPLY_GREET = (
     "Namaste! Main aapki dukaan ka hisaab rakhne mein madad karta hoon. "
-    "Aap bol ya likh sakte hain — jaise ‘Ramesh ko 500 udhaar likho’ ya ‘Ramesh kitna baaki hai’."
+    "Aap bol ya likh sakte hain — jaise ‘Ramesh ko 500 udhaar likho’."
 )
 _REPLY_THANKS = "Koi baat nahi! Aur kuch likhna ho to bataiye."
 _REPLY_BYE = "Theek hai, phir milte hain!"
@@ -99,7 +99,7 @@ def _is_collect(text: str) -> bool:
 
 def respond(message: str, lang: str = "auto", conn=None, session_id: str = "default") -> str:
     if not (message or "").strip():
-        return "Namaste! Boliye ya likhiye — jaise ‘Ramesh ko 500 udhaar likho’ ya ‘Ramesh kitna baaki hai’."
+        return "Namaste! Boliye ya likhiye — jaise ‘Ramesh ko 500 udhaar likho’."
 
     own_conn = conn is None
     if own_conn:
