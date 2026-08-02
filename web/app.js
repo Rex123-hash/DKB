@@ -657,24 +657,24 @@ function clearActiveDraft() {
 }
 
 const missingLabels = {
-  bill_type: "Is this a sale or purchase bill?",
-  bill_date: "What is the bill date? (YYYY-MM-DD)",
-  "party.name": "What is the customer or supplier name?",
-  gst_mode: "Should I make this GST or non-GST?",
-  gst_rate: "What GST percentage applies?",
-  tax_scheme: "Is it CGST + SGST or IGST?",
-  payment_status: "Was it paid, on credit, or partially paid?",
-  paid_amount_paise: "How much was paid?",
-  items: "Please add at least one item in Review.",
-  "items.quantities": "I found the item rows but could not safely read their quantities. Are all quantities 1? Reply 'all 1', or fill them manually.",
-  "items.prices": "I found the item names but could not safely read all prices. Please fill the prices in Review.",
+  bill_type: "Ye aapki sale hai ya purchase?",
+  bill_date: "Bill par date kya hai? (jaise 18 Jan 2026, 18/01/2026, ya 'kal')",
+  "party.name": "Party ka naam kya likhun?",
+  gst_mode: "Ye GST bill hai ya non-GST?",
+  gst_rate: "GST kitne % ka hai?",
+  tax_scheme: "Same state ka hai (CGST+SGST) ya doosre state ka (IGST)?",
+  payment_status: "Payment ho gayi, udhaar hai, ya thodi si aayi hai?",
+  paid_amount_paise: "Kitna paisa mila hai?",
+  items: "Ek bhi item nahi padh paaya — Review mein add kar dijiye.",
+  "items.quantities": "Item ki quantity saaf nahi dikhi. Sab 1-1 hain? 'all 1' likh dijiye, warna Review mein bhar dijiye.",
+  "items.prices": "Naam to mil gaye, par rate saaf nahi dikha. Review mein rate bhar dijiye.",
 };
 function missingQuestion(path) {
   if (missingLabels[path]) return missingLabels[path];
-  if (/items\.\d+\.name/.test(path)) return "What is the missing item name?";
-  if (/items\.\d+\.quantity/.test(path)) return "What is the missing item quantity?";
-  if (/items\.\d+\.unit_price_paise/.test(path)) return "What is the missing item price?";
-  return `Please confirm ${path}.`;
+  if (/items\.\d+\.name/.test(path)) return "Ek item ka naam nahi padha — kya likhun?";
+  if (/items\.\d+\.quantity/.test(path)) return "Ek item ki quantity nahi dikhi — kitni hai?";
+  if (/items\.\d+\.unit_price_paise/.test(path)) return "Ek item ka rate nahi dikha — kitna hai?";
+  return `Zara ${path} confirm kar dijiye.`;
 }
 
 // Short noun-phrases so several gaps can be asked for in one natural sentence
@@ -699,23 +699,45 @@ function missingShortLabel(path) {
   if (/items\.\d+\.unit_price_paise/.test(path)) return "item ka rate";
   return path;
 }
+// Ask for exactly one thing at a time. Listing every gap at once reads like a
+// form, not a conversation.
 function missingAsk(fields) {
   const pending = (fields || []).filter(Boolean);
-  if (!pending.length) return "";
-  if (pending.length === 1) return missingQuestion(pending[0]);
-  const shown = pending.slice(0, 3).map(missingShortLabel);
-  const rest = pending.length - shown.length;
-  const list = shown.slice(0, -1).join(", ") + " aur " + shown[shown.length - 1];
-  return `Bas itna reh gaya — ${list}${rest > 0 ? ` (+${rest} aur)` : ""}. `
-    + "Sab ek hi message mein bata dijiye, main samajh lunga.";
+  return pending.length ? missingQuestion(pending[0]) : "";
+}
+
+const appliedLabels = {
+  bill_type: (d) => d.bill_type === "purchase" ? "Purchase" : "Sale",
+  bill_date: (d) => d.bill_date,
+  gst_mode: (d) => d.gst_mode === "gst" ? "GST" : "Non-GST",
+  gst_rate: (d) => `${d.gst_rate}% GST`,
+  tax_scheme: (d) => d.tax_scheme === "igst" ? "IGST" : "CGST+SGST",
+  payment_status: (d) => ({ paid: "Paid", credit: "Udhaar", partial: "Partial" })[d.payment_status],
+  paid_amount_paise: (d) => `${fmtPaise(d.paid_amount_paise)} paid`,
+  "party.name": (d) => (d.party || {}).name,
+  "party.phone": (d) => (d.party || {}).phone,
+  "party.gstin": (d) => "GSTIN",
+};
+// "Sale aur udhaar note kar liya." — proof it actually heard the last message.
+function appliedNote(draft) {
+  const data = draft.data || {};
+  const parts = (draft.applied_fields || [])
+    .map((field) => appliedLabels[field] && appliedLabels[field](data))
+    .filter(Boolean);
+  if (!parts.length) return "";
+  const shown = parts.slice(0, 3);
+  const list = shown.length > 1
+    ? shown.slice(0, -1).join(", ") + " aur " + shown[shown.length - 1]
+    : shown[0];
+  return `${list} note kar liya.`;
 }
 function billAssistantReply(draft) {
   const calc = draft.calculation || {};
   if (draft.answer_applied === false) {
     const ask = missingAsk(calc.missing_fields);
     return ask
-      ? `Sorry, wo main pakad nahi paaya. ${ask} Ya "Fill details manually" tap kar lijiye.`
-      : "Sorry, wo main pakad nahi paaya. Review kholkar detail seedhe edit kar lijiye.";
+      ? `Ye main samajh nahi paaya. ${ask}`
+      : "Ye main samajh nahi paaya. Review kholkar detail seedhe edit kar lijiye.";
   }
   const errors = (calc.warnings || []).filter((w) => w.severity === "error");
   const cautions = (calc.warnings || []).filter((w) => w.severity === "warning");
@@ -725,11 +747,13 @@ function billAssistantReply(draft) {
     return `This image cannot be processed as a bill: ${notBill.message} Please upload a clear sale or purchase bill.`;
   }
   if ((calc.missing_fields || []).length) {
+    const note = appliedNote(draft);
+    if (note) return `${note} ${missingAsk(calc.missing_fields)}`;
     const read = (draft.data || {}).items || [];
     const opener = read.length
-      ? `Bill padh liya — ${read.length} item mile.`
+      ? `Bill padh liya — ${read.length} item, total ${fmtPaise(calc.subtotal_paise)}.`
       : "Scan save kar liya.";
-    return `${opener} ${missingAsk(calc.missing_fields)} Type ya bol kar bata dijiye.`;
+    return `${opener} ${missingAsk(calc.missing_fields)}`;
   }
   if (errors.length) {
     return `I found a calculation mismatch: ${errors[0].message} Open Review to compare and accept or correct it.`;

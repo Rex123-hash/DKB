@@ -662,3 +662,97 @@ def test_relative_day_words_are_understood():
         ).bill_date == "2026-08-03"
     finally:
         extractors.date = original
+
+
+def test_visible_tax_columns_settle_the_gst_mode_without_asking():
+    from app.billing.extractors import remove_empty_items as clean
+
+    draft = clean(BillDraftData(
+        document_kind="bill", tax_scheme="cgst_sgst",
+        items=[BillItemDraft(name="Rice", quantity="2", unit_price_paise=5000,
+                             gst_rate="5")],
+    ))
+    assert draft.gst_mode == "gst"
+    # One rate across every row is the bill's rate; nothing to ask.
+    assert draft.gst_rate == "5"
+
+
+def test_mixed_item_gst_rates_are_not_collapsed_into_one_rate():
+    from app.billing.extractors import remove_empty_items as clean
+
+    draft = clean(BillDraftData(
+        document_kind="bill", tax_scheme="cgst_sgst",
+        items=[
+            BillItemDraft(name="Rice", quantity="2", unit_price_paise=5000, gst_rate="5"),
+            BillItemDraft(name="Soap", quantity="1", unit_price_paise=3000, gst_rate="12"),
+        ],
+    ))
+    assert draft.gst_mode == "gst"
+    assert draft.gst_rate is None
+
+
+def test_bill_with_several_gst_rates_warns_before_one_rate_is_applied():
+    calc = validate_bill(_draft(
+        gst_mode="gst", gst_rate="5", tax_scheme="cgst_sgst",
+        items=[
+            {"name": "Rice", "quantity": "2", "unit_price_paise": 5000, "gst_rate": "5"},
+            {"name": "Soap", "quantity": "1", "unit_price_paise": 3000, "gst_rate": "12"},
+        ],
+    ))
+    warning = next(w for w in calc.warnings if w.code == "mixed_gst_rates")
+    assert warning.severity == "error"
+
+
+def test_a_corrupted_phone_read_is_dropped_rather_than_stored():
+    from app.billing.extractors import remove_empty_items as clean
+
+    draft = clean(BillDraftData(
+        document_kind="bill",
+        party=PartyDraft(phone="+91 8282828281\u81ea\u4fe1GSTIN: 09AAACH7409R1ZZ"),
+    ))
+    assert draft.party.phone == "8282828281"
+    assert draft.party.gstin is None
+
+
+def test_same_rate_written_differently_is_not_treated_as_mixed():
+    from app.billing.extractors import remove_empty_items as clean
+
+    draft = clean(BillDraftData(
+        document_kind="bill", tax_scheme="cgst_sgst",
+        items=[
+            BillItemDraft(name="Rice", quantity="2", unit_price_paise=5000, gst_rate="5.00"),
+            BillItemDraft(name="Dal", quantity="1", unit_price_paise=3000, gst_rate="5"),
+        ],
+    ))
+    assert draft.gst_rate == "5"
+    assert not [w for w in validate_bill(draft).warnings if w.code == "mixed_gst_rates"]
+
+
+def test_tax_inclusive_amount_column_is_not_reported_as_a_maths_error():
+    """Printed GST invoices show the line amount with tax already added."""
+    calc = validate_bill(_draft(
+        gst_mode="gst", gst_rate="5", tax_scheme="cgst_sgst",
+        items=[{"name": "Rice", "quantity": "30", "unit_price_paise": 40000,
+                "written_total_paise": 1260000}],   # 12000 x 1.05
+    ))
+    assert not [w for w in calc.warnings if w.code == "line_total_mismatch"]
+    # The taxable base still drives the accounting, not the inclusive figure.
+    assert calc.subtotal_paise == 1200000
+
+
+def test_a_genuine_line_error_is_still_caught_on_a_gst_bill():
+    calc = validate_bill(_draft(
+        gst_mode="gst", gst_rate="5", tax_scheme="cgst_sgst",
+        items=[{"name": "Rice", "quantity": "30", "unit_price_paise": 40000,
+                "written_total_paise": 900000}],
+    ))
+    assert [w for w in calc.warnings if w.code == "line_total_mismatch"]
+
+
+def test_grand_total_is_not_disputed_while_the_gst_rate_is_unknown():
+    calc = validate_bill(_draft(
+        gst_mode="gst", gst_rate=None, tax_scheme="cgst_sgst",
+        written_grand_total_paise=1325065,
+        items=[{"name": "Rice", "quantity": "30", "unit_price_paise": 40000}],
+    ))
+    assert not [w for w in calc.warnings if w.code == "grand_total_mismatch"]

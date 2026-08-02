@@ -15,10 +15,10 @@ from pathlib import Path
 from typing import Protocol
 
 import requests
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from app import config
-from app.billing.models import BillDraftData
+from app.billing.models import BillDraftData, BillItemDraft
 
 
 class BillExtractor(Protocol):
@@ -64,6 +64,115 @@ class BillHeaderRead(BaseModel):
     bill_number: str
     date_text: str
     bill_date: str
+
+
+class BillItemRead(BaseModel):
+    """Line-item table read on its own.
+
+    A single large schema makes the model return a partial object and drop the
+    items array entirely, even on a crisp printed invoice. A small schema whose
+    fields are all required makes it actually read the table. Amounts are read
+    as printed rupee strings, never as paise, so the model never has to perform
+    the one conversion it is forbidden to calculate.
+    """
+
+    name: str
+    quantity: str
+    unit: str
+    unit_price_rupees: str
+    amount_rupees: str
+    hsn: str
+    gst_rate: str
+
+
+class BillItemsRead(BaseModel):
+    items: list[BillItemRead] = Field(min_length=1)
+
+
+ITEMS_PROMPT = """
+Read ONLY the line-item table of this Indian bill.
+Return one object per real product row, top to bottom, in the printed order.
+Every schema field is required: use an empty string when a cell is blank or
+unreadable. Copy the digits exactly as printed and never calculate, merge,
+split, or invent a row.
+- Serial numbers (Sr, S.No) are not quantities.
+- Total, Subtotal, Taxable, CGST/SGST/IGST, Grand Total, amount-in-words,
+  terms and conditions, bank details, and the signature block are NOT rows.
+- Read handwritten rows as carefully as printed ones.
+""".strip()
+
+
+def _rupees_to_paise(raw: str | None) -> int | None:
+    """Convert a printed rupee amount to integer paise."""
+    text = re.sub(r"[^\d.\-]", "", str(raw or ""))
+    if not text or text in {"-", ".", "-."}:
+        return None
+    try:
+        value = Decimal(text)
+    except Exception:
+        return None
+    if value < 0:
+        return None
+    return int((value * 100).quantize(Decimal("1"), rounding=ROUND_HALF_UP))
+
+
+def _clean_decimal_text(raw: str | None) -> str | None:
+    """Keep a printed quantity/rate as an exact decimal string."""
+    text = re.sub(r"[^\d.]", "", str(raw or ""))
+    if not text:
+        return None
+    try:
+        value = Decimal(text)
+    except Exception:
+        return None
+    if value <= 0:
+        return None
+    formatted = format(value, "f")
+    return formatted.rstrip("0").rstrip(".") if "." in formatted else formatted
+
+
+def recover_items(provider, draft: BillDraftData, **request_kwargs) -> None:
+    """Re-read the item table alone when the main pass returned no rows.
+
+    The combined schema is large enough that the model regularly answers with a
+    partial object and omits `items` entirely — even for a crisp printed
+    invoice. Asking again for only the table reliably recovers it.
+    """
+    if draft.document_kind != "bill" or draft.items:
+        return
+    try:
+        read = BillItemsRead.model_validate(
+            provider._request(
+                ITEMS_PROMPT, BillItemsRead.model_json_schema(), **request_kwargs
+            )
+        )
+    except (requests.RequestException, ValueError):
+        # Recovery is best effort; the shopkeeper can still add rows in Review.
+        return
+    draft.items = items_from_read(read)
+
+
+def items_from_read(read: BillItemsRead) -> list[BillItemDraft]:
+    """Turn a focused table read into canonical draft items."""
+    items: list[BillItemDraft] = []
+    for row in read.items:
+        name = (row.name or "").strip()
+        unit_price = _rupees_to_paise(row.unit_price_rupees)
+        amount = _rupees_to_paise(row.amount_rupees)
+        if not name and unit_price is None and amount is None:
+            continue
+        items.append(
+            BillItemDraft(
+                name=name or None,
+                quantity=_clean_decimal_text(row.quantity),
+                unit=(row.unit or "").strip() or None,
+                unit_price_paise=unit_price,
+                written_total_paise=amount,
+                hsn=(row.hsn or "").strip() or None,
+                gst_rate=_clean_decimal_text(row.gst_rate),
+            )
+        )
+    return items
 
 
 HEADER_PROMPT = """
@@ -115,6 +224,14 @@ def remove_empty_items(draft: BillDraftData) -> BillDraftData:
         )
     ]
     cleaned.bill_date = normalize_bill_date(cleaned.bill_date)
+    cleaned.party.phone = _clean_phone(cleaned.party.phone)
+    cleaned.party.gstin = _clean_gstin(cleaned.party.gstin)
+    for item in cleaned.items:
+        # "5.00" and "5" are the same rate. Without this they compare as two
+        # different rates and a single-rate bill is reported as mixed.
+        item.gst_rate = _clean_decimal_text(item.gst_rate)
+    cleaned.gst_rate = _clean_decimal_text(cleaned.gst_rate) or cleaned.gst_rate
+    _settle_gst_from_evidence(cleaned)
     for item in cleaned.items:
         quantity = _positive_decimal(item.quantity)
         if quantity is None:
@@ -129,6 +246,53 @@ def remove_empty_items(draft: BillDraftData) -> BillDraftData:
             if derived == derived.to_integral_value():
                 item.unit_price_paise = int(derived)
     return cleaned
+
+
+def _settle_gst_from_evidence(draft: BillDraftData) -> None:
+    """Read the GST mode and rate off the bill instead of asking for them.
+
+    A printed tax scheme or a Tax % column is visible evidence, not a guess. A
+    single rate shared by every row is the bill's rate; mixed rates are left
+    unset so the shopkeeper decides rather than having one silently applied.
+    """
+    rates = {
+        (item.gst_rate or "").strip()
+        for item in draft.items
+        if (item.gst_rate or "").strip()
+    }
+    taxed = {rate for rate in rates if _positive_decimal(rate) is not None}
+    if draft.gst_mode is None and (draft.tax_scheme is not None or taxed):
+        draft.gst_mode = "gst"
+    if draft.gst_mode == "gst" and draft.gst_rate is None and len(taxed) == 1:
+        draft.gst_rate = next(iter(taxed))
+
+
+def _clean_phone(raw: str | None) -> str | None:
+    """Keep a phone only when it is a real 10-digit Indian mobile.
+
+    Vision models sometimes run neighbouring cells together — one real read
+    returned "+91 8282828281<junk>GSTIN: 09AAACH...". Garbage is not
+    information, and an unusable number would otherwise block finalization.
+    """
+    # Scan each run of digits separately. Concatenating them would merge the
+    # phone with whatever the model ran into it (a GSTIN, a PAN) and destroy
+    # a number that was actually read correctly.
+    text = re.sub(r"[\s\-()]", "", str(raw or ""))
+    for run in re.findall(r"\d+", text):
+        if len(run) == 12 and run.startswith("91"):
+            run = run[2:]
+        elif len(run) == 11 and run.startswith("0"):
+            run = run[1:]
+        if len(run) == 10 and run[0] in "6789":
+            return run
+    return None
+
+
+def _clean_gstin(raw: str | None) -> str | None:
+    match = re.search(
+        r"\b(\d{2}[A-Z]{5}\d{4}[A-Z][A-Z\d]Z[A-Z\d])\b", str(raw or "").upper()
+    )
+    return match.group(1) if match else None
 
 
 def _positive_decimal(value: str | None) -> Decimal | None:
@@ -296,6 +460,25 @@ class OllamaBillExtractor:
             # A generic CASH MEMO does not reveal whether this shopkeeper is
             # entering it as their sale or purchase. Ask instead of guessing.
             draft.bill_type = None
+        if draft.document_kind == "bill" and not draft.items:
+            try:
+                draft.items = items_from_read(
+                    BillItemsRead.model_validate(
+                        self._request(
+                            [
+                                {"role": "system", "content": ITEMS_PROMPT},
+                                {
+                                    "role": "user",
+                                    "content": "Read the item table.",
+                                    "images": [encoded],
+                                },
+                            ],
+                            BillItemsRead.model_json_schema(),
+                        )
+                    )
+                )
+            except (requests.RequestException, ValueError):
+                pass
         if draft.document_kind == "bill":
             try:
                 header = BillHeaderRead.model_validate(
@@ -419,7 +602,14 @@ class GeminiBillExtractor:
                 mime_type=mime_type,
             )
         )
-        if draft.document_kind == "bill" and not (draft.party.name or "").strip():
+        recover_items(self, draft, image_bytes=image_bytes, mime_type=mime_type)
+        # The combined pass drops different header fields on each call, so
+        # re-read the header whenever any of them is still missing.
+        if draft.document_kind == "bill" and not (
+            (draft.party.name or "").strip()
+            and (draft.bill_number or "").strip()
+            and (draft.bill_date or "").strip()
+        ):
             try:
                 header = BillHeaderRead.model_validate(
                     self._request(
@@ -520,7 +710,20 @@ class VertexBillExtractor:
                 ocr_text=ocr_text,
             )
         )
-        if draft.document_kind == "bill" and not (draft.party.name or "").strip():
+        recover_items(
+            self,
+            draft,
+            image_bytes=image_bytes,
+            mime_type=mime_type,
+            ocr_text=ocr_text,
+        )
+        # The combined pass drops different header fields on each call, so
+        # re-read the header whenever any of them is still missing.
+        if draft.document_kind == "bill" and not (
+            (draft.party.name or "").strip()
+            and (draft.bill_number or "").strip()
+            and (draft.bill_date or "").strip()
+        ):
             try:
                 header = BillHeaderRead.model_validate(
                     self._request(

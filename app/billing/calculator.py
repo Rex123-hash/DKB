@@ -31,6 +31,24 @@ def _round_paise(value: Decimal) -> int:
     return int(value.quantize(_PAISE, rounding=ROUND_HALF_UP))
 
 
+def _matches_tax_inclusive(draft: BillDraftData, item, line_total: int) -> bool:
+    """Is the written line amount simply the taxable amount plus its GST?
+
+    Most printed Indian invoices put the tax-inclusive figure in the Amount
+    column while quantity x rate is the taxable base. Treating that ordinary
+    difference as an arithmetic error would block valid bills, so it is only a
+    real mismatch when the written figure matches neither reading.
+    """
+    if draft.gst_mode != "gst" or item.written_total_paise is None:
+        return False
+    rate = _decimal(item.gst_rate or draft.gst_rate)
+    if rate is None or not 0 < rate <= 100:
+        return False
+    inclusive = _round_paise(Decimal(line_total) * (Decimal(100) + rate) / Decimal(100))
+    # One paisa of slack absorbs the rounding the printer applied.
+    return abs(item.written_total_paise - inclusive) <= 1
+
+
 def validate_bill(draft: BillDraftData) -> BillCalculation:
     """Calculate a draft and return every missing field/discrepancy."""
     calc = BillCalculation(
@@ -119,6 +137,7 @@ def validate_bill(draft: BillDraftData) -> BillCalculation:
             if (
                 item.written_total_paise is not None
                 and item.written_total_paise != line_total
+                and not _matches_tax_inclusive(draft, item, line_total)
             ):
                 calc.warnings.append(
                     DraftWarning(
@@ -190,6 +209,27 @@ def validate_bill(draft: BillDraftData) -> BillCalculation:
     calc.taxable_paise = taxable
 
     if draft.gst_mode == "gst":
+        item_rates = {
+            (item.gst_rate or "").strip()
+            for item in draft.items
+            if (item.gst_rate or "").strip()
+        }
+        if len(item_rates) > 1:
+            # One rate cannot represent a bill whose rows are taxed differently,
+            # and silently applying one would post a wrong total.
+            calc.warnings.append(
+                DraftWarning(
+                    code="mixed_gst_rates",
+                    field="gst_rate",
+                    severity="error",
+                    message=(
+                        "This bill has more than one GST rate ("
+                        + ", ".join(f"{rate}%" for rate in sorted(item_rates))
+                        + "). Split it into one bill per rate, or set the "
+                        "single rate that applies."
+                    ),
+                )
+            )
         rate = _decimal(draft.gst_rate)
         if rate is None or rate < 0:
             calc.missing_fields.append("gst_rate")
@@ -225,9 +265,16 @@ def validate_bill(draft: BillDraftData) -> BillCalculation:
             )
         )
 
+    gst_is_undecided = draft.gst_mode == "gst" and (
+        "gst_rate" in calc.missing_fields
+        or any(warning.code == "mixed_gst_rates" for warning in calc.warnings)
+    )
     if (
         draft.written_grand_total_paise is not None
         and draft.written_grand_total_paise != calc.grand_total_paise
+        # Disputing the printed total before the GST rate is settled only
+        # produces a second, confusing error about the same missing input.
+        and not gst_is_undecided
     ):
         calc.warnings.append(
             DraftWarning(

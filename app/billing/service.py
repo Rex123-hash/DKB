@@ -215,5 +215,19 @@ def answer_draft(
     # Tell the caller whether the reply actually changed anything, so the
     # assistant can say "I did not catch that" instead of silently repeating
     # the same question and sounding broken.
-    result["answer_applied"] = updated.model_dump() != data.model_dump()
+    before, after = data.model_dump(), updated.model_dump()
+    result["answer_applied"] = after != before
+    # Naming what was just understood is what makes the assistant sound like it
+    # is listening rather than working through a form.
+    result["applied_fields"] = [
+        field
+        for field in ("bill_type", "bill_date", "gst_mode", "gst_rate",
+                      "tax_scheme", "payment_status", "paid_amount_paise")
+        if before.get(field) != after.get(field) and after.get(field) is not None
+    ] + [
+        f"party.{part}"
+        for part in ("name", "phone", "gstin")
+        if before["party"].get(part) != after["party"].get(part)
+        and after["party"].get(part) is not None
+    ]
     return result
