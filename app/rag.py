@@ -22,6 +22,7 @@ from pathlib import Path
 
 import numpy as np
 
+from app import config
 from app import db as db_layer
 
 MODEL_NAME = os.environ.get("EMBED_MODEL", "intfloat/multilingual-e5-large")
@@ -66,6 +67,10 @@ GEMINI_PACE = float(os.environ.get("GEMINI_EMBED_PACE", "1.5"))
 GEMINI_EMBED_DIM = int(os.environ.get("GEMINI_EMBED_DIM", "768"))
 
 
+def _use_vertex_embeddings() -> bool:
+    return config.gcp_enabled() and bool(os.environ.get("GOOGLE_CLOUD_PROJECT"))
+
+
 def _use_gemini() -> bool:
     forced = os.environ.get("EMBED_BACKEND")
     if forced == "local":
@@ -74,7 +79,7 @@ def _use_gemini() -> bool:
         return True
     if importlib.util.find_spec("fastembed") is not None:
         return False
-    return bool(os.environ.get("GEMINI_API_KEY"))
+    return bool(os.environ.get("GEMINI_API_KEY")) or _use_vertex_embeddings()
 
 
 def _backend_id() -> str:
@@ -84,6 +89,8 @@ def _backend_id() -> str:
 
 
 def _gemini_embed(texts: list[str], kind: str) -> np.ndarray:
+    if _use_vertex_embeddings() and not os.environ.get("GEMINI_API_KEY"):
+        return _vertex_embed(texts, kind)
     import requests
 
     key = os.environ["GEMINI_API_KEY"]
@@ -117,6 +124,42 @@ def _gemini_embed(texts: list[str], kind: str) -> np.ndarray:
         else:
             response.raise_for_status()
         out.extend(item["values"] for item in response.json()["embeddings"])
+    return np.array(out, dtype=np.float32)
+
+
+def _vertex_embed(texts: list[str], kind: str) -> np.ndarray:
+    """Embed through Vertex AI using the Cloud Run service account's ADC."""
+    import requests
+
+    from app import gcp
+
+    location = os.environ.get("GCP_EMBED_LOCATION", "us-central1").strip() or "us-central1"
+    url = (
+        f"https://{location}-aiplatform.googleapis.com/v1/projects/{gcp.project_id()}"
+        f"/locations/{location}/publishers/google/models/{GEMINI_EMBED_MODEL}:predict"
+    )
+    task = "RETRIEVAL_QUERY" if kind == "query" else "RETRIEVAL_DOCUMENT"
+    headers = {
+        "Authorization": f"Bearer {gcp.access_token()}",
+        "Content-Type": "application/json",
+    }
+    out: list[list[float]] = []
+    # gemini-embedding-001 accepts one input per Vertex prediction request.
+    for text in texts:
+        response = requests.post(
+            url,
+            headers=headers,
+            json={
+                "instances": [{"content": text, "task_type": task}],
+                "parameters": {
+                    "autoTruncate": True,
+                    "outputDimensionality": GEMINI_EMBED_DIM,
+                },
+            },
+            timeout=60,
+        )
+        response.raise_for_status()
+        out.append(response.json()["predictions"][0]["embeddings"]["values"])
     return np.array(out, dtype=np.float32)
 
 

@@ -16,6 +16,36 @@ def fake_embed(texts):
     return np.array([vec(t) for t in texts], dtype=np.float32)
 
 
+def test_vertex_embed_uses_adc_and_retrieval_task(monkeypatch):
+    from app import config, gcp
+
+    monkeypatch.setattr(config, "GCP_ENABLED", True)
+    monkeypatch.setenv("GOOGLE_CLOUD_PROJECT", "atlasaccess")
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    monkeypatch.setattr(gcp, "project_id", lambda: "atlasaccess")
+    monkeypatch.setattr(gcp, "access_token", lambda: "adc-token")
+    calls = []
+
+    class Response:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"predictions": [{"embeddings": {"values": [0.1, 0.2, 0.3]}}]}
+
+    def fake_post(url, headers=None, json=None, timeout=None):
+        calls.append((url, headers, json, timeout))
+        return Response()
+
+    monkeypatch.setattr("requests.post", fake_post)
+    vectors = rag._vertex_embed(["GST kya hai?"], "query")
+
+    assert vectors.shape == (1, 3)
+    assert calls[0][1]["Authorization"] == "Bearer adc-token"
+    assert calls[0][2]["instances"][0]["task_type"] == "RETRIEVAL_QUERY"
+    assert "gemini-embedding-001:predict" in calls[0][0]
+
+
 def _kb(tmp_path):
     (tmp_path / "a.md").write_text(
         "GST is a tax. GST registration threshold is 40 lakh for goods.", encoding="utf-8")
