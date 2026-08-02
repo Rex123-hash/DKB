@@ -95,7 +95,9 @@ function setStopResponseVisible(visible) {
 // speaker toggle says.
 async function speakText(text, force = false) {
   if (!force && !state.speakReplies) return;
-  if (!state.voice || !text) return;
+  if (!text) return;
+  // Deliberately not gated on state.voice: that flag is only set once /health
+  // resolves, and a reply arriving first would silently go unspoken.
   try {
     const res = await postJSON("/speak", { text: String(text).slice(0, 2000) });
     if (res && res.audio_b64) playReplyAudio(res.audio_b64);
@@ -111,9 +113,11 @@ function playReplyAudio(base64) {
     };
     setStopResponseVisible(true);
     activeResponseAudio.play().catch(() => {
-      // Autoplay can be blocked until the user interacts; the text reply stands.
+      // Autoplay can be blocked until the page has been interacted with. Say
+      // so, otherwise the assistant just looks broken.
       activeResponseAudio = null;
       setStopResponseVisible(false);
+      toast("Browser ne awaaz block ki — screen par ek baar tap karke dobara try kijiye");
     });
   } catch {
     activeResponseAudio = null;
