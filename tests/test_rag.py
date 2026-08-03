@@ -20,9 +20,9 @@ def test_vertex_embed_uses_adc_and_retrieval_task(monkeypatch):
     from app import config, gcp
 
     monkeypatch.setattr(config, "GCP_ENABLED", True)
-    monkeypatch.setenv("GOOGLE_CLOUD_PROJECT", "atlasaccess")
+    monkeypatch.setenv("GOOGLE_CLOUD_PROJECT", "test-project")
     monkeypatch.delenv("GEMINI_API_KEY", raising=False)
-    monkeypatch.setattr(gcp, "project_id", lambda: "atlasaccess")
+    monkeypatch.setattr(gcp, "project_id", lambda: "test-project")
     monkeypatch.setattr(gcp, "access_token", lambda: "adc-token")
     calls = []
 
