@@ -63,7 +63,7 @@ const FA_ICONS = {
   check: ["fa-solid", "fa-circle-check"], pen: ["fa-solid", "fa-pen-to-square"],
   profile: ["fa-solid", "fa-user"], book: ["fa-solid", "fa-book-open"],
   clock: ["fa-solid", "fa-clock"], trash: ["fa-solid", "fa-trash-can"],
-  card: ["fa-solid", "fa-address-card"], message: ["fa-solid", "fa-message"],
+  card: ["fa-solid", "fa-address-card"], message: ["fa-solid", "fa-comment-dots"],
   gst: ["fa-solid", "fa-indian-rupee-sign"], image: ["fa-solid", "fa-image"],
   speakerOn: ["fa-solid", "fa-volume-high"], speakerOff: ["fa-solid", "fa-volume-xmark"],
 };
