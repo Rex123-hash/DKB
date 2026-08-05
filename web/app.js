@@ -736,13 +736,19 @@ async function scanBillInChat(file) {
       typing.textContent = documentKind === "not_bill"
         ? `This image does not look like a bill. ${(draft.data || {}).document_reason || "Please upload a handwritten or printed sale/purchase bill."}`
         : "I cannot clearly identify this image as a bill. Please upload a clearer photo with the full bill visible.";
+      speakText(typing.textContent);
       return;
     }
     setActiveDraft(draft.id);
-    typing.textContent = (draft.duplicate && !draft.reprocessed)
+    // The first question after a scan is the one most easily missed: the
+    // shopkeeper is still looking at the bill, not the screen. Say it aloud
+    // like every later question, instead of only printing it on the card.
+    const scanReply = (draft.duplicate && !draft.reprocessed)
       ? "Yehi scan pehle se saved tha, wahi khol diya."
       : billAssistantReply(draft);
+    typing.textContent = scanReply;
     appendDraftCard(draft);
+    speakText(scanReply);
   } catch (e) {
     // A busy or slow AI service is not an unreadable bill. Saying so sends the
     // shopkeeper off to re-photograph a photo that was fine.
@@ -750,6 +756,7 @@ async function scanBillInChat(file) {
     typing.textContent = /extraction failed|502|429|timeout|timed out/i.test(detail)
       ? "AI service abhi busy hai, bill padha nahi ja saka. Thodi der baad dobara bhejiye — photo theek hai."
       : "Ye image padhi nahi ja saki. Saaf JPEG, PNG ya WebP photo bhejiye jisme poora bill dikhe.";
+    speakText(typing.textContent);
   }
 }
 
@@ -1021,8 +1028,10 @@ function openBillDraftEditor(draft) {
       const saved = await putJSON(`/bill-drafts/${draft.id}`, { data: collectBillDraft(data) });
       setActiveDraft(saved.id);
       closeBillModal();
-      addBubble(billAssistantReply(saved), "bot");
+      const savedReply = billAssistantReply(saved);
+      addBubble(savedReply, "bot");
       appendDraftCard(saved);
+      speakText(savedReply);
     } catch (e) { toast("Please check the highlighted bill details"); }
   };
   if ($("#acceptMath")) $("#acceptMath").onclick = async () => {
@@ -1043,7 +1052,12 @@ function openBillDraftEditor(draft) {
     try {
       const saved = await putJSON(`/bill-drafts/${draft.id}`, { data: collectBillDraft(data) });
       if (saved.status !== "ready_for_review") {
-        closeBillModal(); addBubble(billAssistantReply(saved), "bot"); appendDraftCard(saved); return;
+        closeBillModal();
+        const pendingReply = billAssistantReply(saved);
+        addBubble(pendingReply, "bot");
+        appendDraftCard(saved);
+        speakText(pendingReply);
+        return;
       }
       const bill = await postJSON(`/bill-drafts/${draft.id}/confirm`, {});
       clearActiveDraft(); closeBillModal();
