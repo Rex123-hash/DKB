@@ -186,3 +186,40 @@ def test_delete_bill_endpoint_reverses_the_posting(client):
 
 def test_deleting_an_unknown_bill_returns_404(client):
     assert client.delete("/bills/424242").status_code == 404
+
+
+def test_edit_bill_endpoint_reposts_the_corrected_bill(client):
+    bill = _post_a_bill(client, session="edit-flow")
+    assert client.get("/stock").json()[0]["quantity"] == "2"
+
+    corrected = complete_purchase()
+    corrected["items"][0]["quantity"] = "5"
+    corrected["items"][0]["written_total_paise"] = None
+    corrected["written_subtotal_paise"] = None
+    corrected["written_grand_total_paise"] = None
+
+    updated = client.put(f"/bills/{bill['id']}", json={"data": corrected})
+    assert updated.status_code == 200
+    body = updated.json()
+    assert body["id"] == bill["id"]                     # identity preserved
+    assert body["grand_total_paise"] == 262500          # 5 x 500 + 5% GST
+
+    assert client.get("/stock").json()[0]["quantity"] == "5"
+    assert len(client.get("/cashbook").json()) == 1     # re-posted once, not twice
+    assert client.get("/bills/summary").json()["total_purchases_paise"] == 262500
+
+
+def test_an_incomplete_edit_is_rejected_and_the_bill_survives(client):
+    bill = _post_a_bill(client, session="edit-reject")
+    broken = complete_purchase()
+    broken["payment_status"] = None
+
+    assert client.put(f"/bills/{bill['id']}", json={"data": broken}).status_code == 400
+    # Nothing moved: the original posting is still intact.
+    assert client.get(f"/bills/{bill['id']}").json()["payment_status"] == "paid"
+    assert client.get("/stock").json()[0]["quantity"] == "2"
+    assert len(client.get("/cashbook").json()) == 1
+
+
+def test_editing_an_unknown_bill_returns_404(client):
+    assert client.put("/bills/9191", json={"data": complete_purchase()}).status_code == 404

@@ -451,12 +451,74 @@ async function openBillDetail(id) {
         <div class="screen-sub">${bill.gst_mode === "gst" ? `GST · ${esc(bill.gst_rate || "0")}%` : "Non-GST"} · ${esc(bill.payment_status)}</div>
       </div>
       <a class="btn-primary download-bill" href="/bills/${bill.id}/pdf" download>Download professional PDF</a>
+      <button class="btn-ghost" id="editBill">${chatIcon("pen")} Edit this bill</button>
       <button class="btn-ghost" id="anotherBill">Scan another bill with AI</button>
       <button class="btn-danger" id="deleteBill">${chatIcon("trash")} Delete this bill</button>`;
     $("#back").onclick = () => { state.nav = "bills"; renderBills(); };
+    $("#editBill").onclick = () => openBillEditor(bill);
     $("#anotherBill").onclick = openBillScannerInChat;
     $("#deleteBill").onclick = () => confirmDeleteBill(bill);
   } catch { toast("Bill could not be loaded"); }
+}
+
+// A finalized bill and a draft hold the same facts in different shapes. Map it
+// back so the existing Review form can edit a posted bill without a second
+// editor being written and kept in step with the first.
+function billAsDraftData(bill) {
+  return {
+    document_kind: "bill",
+    document_reason: null,
+    bill_type: bill.type,
+    bill_number: bill.bill_number,
+    bill_date: bill.bill_date,
+    party: {
+      name: bill.party_name,
+      phone: bill.party_phone || null,
+      gstin: bill.gstin || null,
+    },
+    gst_mode: bill.gst_mode,
+    tax_scheme: bill.tax_scheme || null,
+    gst_rate: bill.gst_rate || null,
+    items: (bill.items || []).map((item) => ({
+      name: item.name,
+      quantity: item.quantity,
+      unit: item.unit || null,
+      unit_price_paise: item.unit_price_paise,
+      written_total_paise: item.written_total_paise,
+      hsn: item.hsn || null,
+      gst_rate: item.gst_rate || null,
+      confidence: {},
+    })),
+    discount_paise: bill.discount_paise || 0,
+    extra_charge_paise: bill.extra_charge_paise || 0,
+    round_off_paise: bill.round_off_paise || 0,
+    written_subtotal_paise: null,
+    written_grand_total_paise: null,
+    payment_status: bill.payment_status,
+    paid_amount_paise: bill.payment_status === "partial" ? bill.paid_paise : null,
+    note: bill.note || null,
+    confidence: {},
+  };
+}
+
+function openBillEditor(bill) {
+  const data = billAsDraftData(bill);
+  openBillDraftEditor(
+    { id: bill.id, status: "ready_for_review", data, calculation: {} },
+    {
+      title: "Edit bill",
+      subtitle: `${bill.bill_number} · nothing changes until you save`,
+      saveLabel: "Save changes",
+      onSave: async (corrected) => {
+        const updated = await putJSON(`/bills/${bill.id}`, { data: corrected });
+        closeBillModal();
+        toast(`Bill ${updated.bill_number} update ho gaya`);
+        (updated.stock_alerts || []).forEach((alert) => toast(alert));
+        await loadData();
+        openBillDetail(bill.id);
+      },
+    },
+  );
 }
 
 // Deleting a bill is not just removing a row: it puts stock back, drops the
@@ -1005,14 +1067,17 @@ function option(value, current, label) {
   return `<option value="${value}" ${value === current ? "selected" : ""}>${label}</option>`;
 }
 
-function openBillDraftEditor(draft) {
+function openBillDraftEditor(draft, options = {}) {
+  // `options` turns the same form into an editor for an already-posted bill,
+  // so both paths share one set of fields and validation.
+  const editing = typeof options.onSave === "function";
   const data = draft.data || {}, party = data.party || {}, calc = draft.calculation || {};
   const items = (data.items && data.items.length ? data.items : [{}]);
   const warningHTML = (calc.warnings || []).map((warning) =>
     `<div class="math-warning ${warning.severity}">${chatIcon("warning")} ${esc(warning.message)}</div>`).join("");
   showModal(`<div class="bill-review">
-    <div class="review-title"><div><h3>Review AI bill</h3>
-      <div class="screen-sub">Nothing is posted until you confirm.</div></div>
+    <div class="review-title"><div><h3>${esc(options.title || "Review AI bill")}</h3>
+      <div class="screen-sub">${esc(options.subtitle || "Nothing is posted until you confirm.")}</div></div>
       <button class="close-x" id="cancel">×</button></div>
     ${warningHTML}
     ${(calc.missing_fields || []).length ? `<div class="missing-box"><b>AI still needs:</b>
@@ -1053,8 +1118,8 @@ function openBillDraftEditor(draft) {
     ${(calc.warnings || []).some((w) => w.severity === "error") ?
       `<button class="btn-ghost math-accept" id="acceptMath">Use DukanBook's maths instead of the written figures</button>` : ""}
     <div class="review-actions">
-      <button class="btn-ghost" id="saveDraft">Save & recheck</button>
-      <button class="btn-primary" id="confirmDraft">Confirm & post bill</button>
+      ${editing ? "" : `<button class="btn-ghost" id="saveDraft">Save & recheck</button>`}
+      <button class="btn-primary" id="confirmDraft">${esc(options.saveLabel || "Confirm & post bill")}</button>
     </div>
   </div>`);
   $("#modalCard").classList.add("bill-modal");
@@ -1065,7 +1130,7 @@ function openBillDraftEditor(draft) {
     wireRemoveBillItems();
   };
   wireRemoveBillItems();
-  $("#saveDraft").onclick = async () => {
+  if ($("#saveDraft")) $("#saveDraft").onclick = async () => {
     try {
       const saved = await putJSON(`/bill-drafts/${draft.id}`, { data: collectBillDraft(data) });
       setActiveDraft(saved.id);
@@ -1091,6 +1156,18 @@ function openBillDraftEditor(draft) {
     } catch { toast("Could not apply verified totals"); }
   };
   $("#confirmDraft").onclick = async () => {
+    if (editing) {
+      $("#confirmDraft").disabled = true;
+      try {
+        await options.onSave(collectBillDraft(data));
+      } catch (error) {
+        $("#confirmDraft").disabled = false;
+        toast(/400|not ready/.test(String(error && error.message))
+          ? "Bill adhoora hai — missing details bhar dijiye"
+          : "Bill update nahi ho paya");
+      }
+      return;
+    }
     try {
       const saved = await putJSON(`/bill-drafts/${draft.id}`, { data: collectBillDraft(data) });
       if (saved.status !== "ready_for_review") {

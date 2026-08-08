@@ -392,6 +392,17 @@ def get_bill(bill_id: int, conn=Depends(get_conn)) -> dict:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
+@app.put("/bills/{bill_id}")
+def update_bill(bill_id: int, req: BillDraftReplaceIn, conn=Depends(get_conn)) -> dict:
+    """Correct a finalized bill, reversing and re-posting its side effects."""
+    try:
+        return billing_repository.update_bill(conn, bill_id, req.data)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
 @app.delete("/bills/{bill_id}")
 def delete_bill(bill_id: int, conn=Depends(get_conn)) -> dict:
     """Delete a wrongly entered bill and reverse everything it posted."""

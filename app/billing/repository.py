@@ -220,6 +220,135 @@ def _quantity_text(value: Decimal) -> str:
     return format(value.normalize(), "f")
 
 
+def _apply_postings(
+    conn: sqlite3.Connection,
+    bill_id: int,
+    data: BillDraftData,
+    calculation: BillCalculation,
+    party: sqlite3.Row,
+    bill_number: str,
+) -> list[str]:
+    """Write the items and every side effect a posted bill causes.
+
+    Shared by finalizing a new bill and re-posting an edited one, so the
+    two can never drift apart on stock, cash, or the party ledger.
+    """
+    direction = "in" if data.bill_type == "purchase" else "out"
+    stock_alerts: list[str] = []
+    for item, line in zip(data.items, calculation.lines, strict=True):
+        assert item.name is not None
+        assert item.unit_price_paise is not None
+        assert line.calculated_total_paise is not None
+        quantity = _quantity(item.quantity)
+        conn.execute(
+            """
+            INSERT INTO bill_item (
+                bill_id, name, quantity, unit, unit_price_paise,
+                line_total_paise, written_total_paise, hsn, gst_rate
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                bill_id,
+                item.name.strip(),
+                _quantity_text(quantity),
+                item.unit,
+                item.unit_price_paise,
+                line.calculated_total_paise,
+                item.written_total_paise,
+                item.hsn,
+                item.gst_rate or data.gst_rate,
+            ),
+        )
+        product = conn.execute(
+            "SELECT * FROM product WHERE name = ? COLLATE NOCASE",
+            (item.name.strip(),),
+        ).fetchone()
+        if product is None:
+            product_cursor = conn.execute(
+                """
+                INSERT INTO product (name, quantity, unit, updated_at)
+                VALUES (?, '0', ?, ?)
+                """,
+                (item.name.strip(), item.unit, _now()),
+            )
+            product_id = int(product_cursor.lastrowid)
+            current_quantity = Decimal(0)
+        else:
+            product_id = int(product["id"])
+            current_quantity = Decimal(str(product["quantity"]))
+        new_quantity = (
+            current_quantity + quantity
+            if direction == "in"
+            else current_quantity - quantity
+        )
+        if new_quantity < 0:
+            # Selling more than the recorded stock is allowed — the book is
+            # often behind reality — but the shopkeeper must be told.
+            stock_alerts.append(
+                f"{item.name.strip()} stock is now "
+                f"{_quantity_text(new_quantity)}"
+                f"{' ' + item.unit if item.unit else ''}. "
+                "Please check your opening stock."
+            )
+        conn.execute(
+            "UPDATE product SET quantity = ?, unit = COALESCE(?, unit), "
+            "updated_at = ? WHERE id = ?",
+            (_quantity_text(new_quantity), item.unit, _now(), product_id),
+        )
+        conn.execute(
+            """
+            INSERT INTO stock_movement (
+                bill_id, product_id, direction, quantity, created_at
+            ) VALUES (?, ?, ?, ?, ?)
+            """,
+            (
+                bill_id,
+                product_id,
+                direction,
+                _quantity_text(quantity),
+                _now(),
+            ),
+        )
+
+    if calculation.paid_paise > 0:
+        cash_direction = "in" if data.bill_type == "sale" else "out"
+        conn.execute(
+            """
+            INSERT INTO cashbook_entry (
+                bill_id, direction, amount_paise, note, entry_date, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                bill_id,
+                cash_direction,
+                calculation.paid_paise,
+                f"{data.bill_type.title()} bill {bill_number}",
+                data.bill_date,
+                _now(),
+            ),
+        )
+
+    if calculation.due_paise > 0:
+        txn_type = "credit" if data.bill_type == "sale" else "debit"
+        conn.execute(
+            """
+            INSERT INTO "transaction" (
+                party_id, type, amount, note, txn_date, source
+            ) VALUES (?, ?, ?, ?, ?, 'text')
+            """,
+            (
+                int(party["id"]),
+                txn_type,
+                calculation.due_paise / 100,
+                f"Bill {bill_number}",
+                # The ledger must follow the bill's own date, otherwise a
+                # back-dated bill lands in today's statement.
+                data.bill_date,
+            ),
+        )
+    return stock_alerts
+
+
 def finalize_draft(conn: sqlite3.Connection, draft_id: str) -> dict:
     """Finalize once and post every side effect in one SQLite transaction."""
     existing = conn.execute(
@@ -302,119 +431,9 @@ def finalize_draft(conn: sqlite3.Connection, draft_id: str) -> dict:
         )
         bill_id = int(cursor.lastrowid)
 
-        direction = "in" if data.bill_type == "purchase" else "out"
-        stock_alerts: list[str] = []
-        for item, line in zip(data.items, calculation.lines, strict=True):
-            assert item.name is not None
-            assert item.unit_price_paise is not None
-            assert line.calculated_total_paise is not None
-            quantity = _quantity(item.quantity)
-            conn.execute(
-                """
-                INSERT INTO bill_item (
-                    bill_id, name, quantity, unit, unit_price_paise,
-                    line_total_paise, written_total_paise, hsn, gst_rate
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    bill_id,
-                    item.name.strip(),
-                    _quantity_text(quantity),
-                    item.unit,
-                    item.unit_price_paise,
-                    line.calculated_total_paise,
-                    item.written_total_paise,
-                    item.hsn,
-                    item.gst_rate or data.gst_rate,
-                ),
-            )
-            product = conn.execute(
-                "SELECT * FROM product WHERE name = ? COLLATE NOCASE",
-                (item.name.strip(),),
-            ).fetchone()
-            if product is None:
-                product_cursor = conn.execute(
-                    """
-                    INSERT INTO product (name, quantity, unit, updated_at)
-                    VALUES (?, '0', ?, ?)
-                    """,
-                    (item.name.strip(), item.unit, _now()),
-                )
-                product_id = int(product_cursor.lastrowid)
-                current_quantity = Decimal(0)
-            else:
-                product_id = int(product["id"])
-                current_quantity = Decimal(str(product["quantity"]))
-            new_quantity = (
-                current_quantity + quantity
-                if direction == "in"
-                else current_quantity - quantity
-            )
-            if new_quantity < 0:
-                # Selling more than the recorded stock is allowed — the book is
-                # often behind reality — but the shopkeeper must be told.
-                stock_alerts.append(
-                    f"{item.name.strip()} stock is now "
-                    f"{_quantity_text(new_quantity)}"
-                    f"{' ' + item.unit if item.unit else ''}. "
-                    "Please check your opening stock."
-                )
-            conn.execute(
-                "UPDATE product SET quantity = ?, unit = COALESCE(?, unit), "
-                "updated_at = ? WHERE id = ?",
-                (_quantity_text(new_quantity), item.unit, _now(), product_id),
-            )
-            conn.execute(
-                """
-                INSERT INTO stock_movement (
-                    bill_id, product_id, direction, quantity, created_at
-                ) VALUES (?, ?, ?, ?, ?)
-                """,
-                (
-                    bill_id,
-                    product_id,
-                    direction,
-                    _quantity_text(quantity),
-                    _now(),
-                ),
-            )
-
-        if calculation.paid_paise > 0:
-            cash_direction = "in" if data.bill_type == "sale" else "out"
-            conn.execute(
-                """
-                INSERT INTO cashbook_entry (
-                    bill_id, direction, amount_paise, note, entry_date, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    bill_id,
-                    cash_direction,
-                    calculation.paid_paise,
-                    f"{data.bill_type.title()} bill {bill_number}",
-                    data.bill_date,
-                    _now(),
-                ),
-            )
-
-        if calculation.due_paise > 0:
-            txn_type = "credit" if data.bill_type == "sale" else "debit"
-            conn.execute(
-                """
-                INSERT INTO "transaction" (
-                    party_id, type, amount, note, txn_date, source
-                ) VALUES (?, ?, ?, ?, ?, 'text')
-                """,
-                (
-                    int(party["id"]),
-                    txn_type,
-                    calculation.due_paise / 100,
-                    f"Bill {bill_number}",
-                    # The ledger must follow the bill's own date, otherwise a
-                    # back-dated bill lands in today's statement.
-                    data.bill_date,
-                ),
-            )
+        stock_alerts = _apply_postings(
+            conn, bill_id, data, calculation, party, bill_number
+        )
 
         conn.execute(
             """
@@ -431,6 +450,129 @@ def finalize_draft(conn: sqlite3.Connection, draft_id: str) -> dict:
     except Exception:
         conn.rollback()
         raise
+
+
+def _reverse_postings(conn: sqlite3.Connection, row: sqlite3.Row) -> None:
+    """Undo the stock, cash and ledger a posted bill caused.
+
+    Used both when a wrong bill is deleted and when a corrected one is
+    re-posted, so a bill can never be edited into leaving stale stock or a
+    balance the party does not actually owe.
+    """
+    bill_id = int(row["id"])
+    # Put the stock back exactly as it was: a purchase added, so subtract;
+    # a sale removed, so add.
+    movements = conn.execute(
+        "SELECT product_id, direction, quantity FROM stock_movement "
+        "WHERE bill_id = ?",
+        (bill_id,),
+    ).fetchall()
+    for movement in movements:
+        product = conn.execute(
+            "SELECT quantity FROM product WHERE id = ?",
+            (int(movement["product_id"]),),
+        ).fetchone()
+        if product is None:
+            continue
+        current = Decimal(str(product["quantity"]))
+        moved = Decimal(str(movement["quantity"]))
+        restored = (
+            current - moved if movement["direction"] == "in" else current + moved
+        )
+        conn.execute(
+            "UPDATE product SET quantity = ?, updated_at = ? WHERE id = ?",
+            (_quantity_text(restored), _now(), int(movement["product_id"])),
+        )
+    conn.execute("DELETE FROM stock_movement WHERE bill_id = ?", (bill_id,))
+    conn.execute("DELETE FROM cashbook_entry WHERE bill_id = ?", (bill_id,))
+
+    # The ledger row carries no bill_id, so it is matched on the note that
+    # finalization wrote for exactly this bill and party.
+    conn.execute(
+        'DELETE FROM "transaction" WHERE party_id = ? AND note = ?',
+        (int(row["party_id"]), f"Bill {row['bill_number']}"),
+    )
+
+
+def update_bill(
+    conn: sqlite3.Connection, bill_id: int, data: BillDraftData | dict
+) -> dict:
+    """Re-post a finalized bill from corrected details.
+
+    A wrong bill has already moved stock and money, so correcting it is not an
+    UPDATE: the old posting is reversed and the new one applied, in one
+    transaction. The bill keeps its id so its PDF link and history stay valid.
+    """
+    data = BillDraftData.model_validate(data)
+    row = conn.execute("SELECT * FROM bill WHERE id = ?", (bill_id,)).fetchone()
+    if row is None:
+        raise KeyError(f"bill {bill_id} not found")
+
+    calculation = validate_bill(data)
+    if not calculation.is_ready:
+        # Refuse before touching anything, so a rejected edit leaves the
+        # original bill and the shop's books exactly as they were.
+        detail = {
+            "missing_fields": calculation.missing_fields,
+            "warnings": [w.model_dump(mode="json") for w in calculation.warnings],
+        }
+        raise ValueError(f"bill is not ready: {json.dumps(detail)}")
+
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        _reverse_postings(conn, row)
+        conn.execute("DELETE FROM bill_item WHERE bill_id = ?", (bill_id,))
+
+        party = _party_for_bill(conn, data)
+        bill_number = (data.bill_number or "").strip() or row["bill_number"]
+        conn.execute(
+            """
+            UPDATE bill SET
+                type = ?, bill_number = ?, bill_date = ?, party_id = ?,
+                party_name = ?, party_phone = ?, gstin = ?, gst_mode = ?,
+                tax_scheme = ?, gst_rate = ?, payment_status = ?,
+                subtotal_paise = ?, discount_paise = ?, extra_charge_paise = ?,
+                taxable_paise = ?, cgst_paise = ?, sgst_paise = ?, igst_paise = ?,
+                round_off_paise = ?, grand_total_paise = ?, paid_paise = ?, note = ?
+            WHERE id = ?
+            """,
+            (
+                data.bill_type,
+                bill_number,
+                data.bill_date,
+                int(party["id"]),
+                party["name"],
+                party["phone"],
+                data.party.gstin,
+                data.gst_mode,
+                data.tax_scheme if data.gst_mode == "gst" else None,
+                data.gst_rate if data.gst_mode == "gst" else None,
+                data.payment_status,
+                calculation.subtotal_paise,
+                calculation.discount_paise,
+                calculation.extra_charge_paise,
+                calculation.taxable_paise,
+                calculation.cgst_paise,
+                calculation.sgst_paise,
+                calculation.igst_paise,
+                calculation.round_off_paise,
+                calculation.grand_total_paise,
+                calculation.paid_paise,
+                data.note,
+                bill_id,
+            ),
+        )
+        stock_alerts = _apply_postings(
+            conn, bill_id, data, calculation, party, bill_number
+        )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+
+    updated = get_bill(conn, bill_id)
+    updated["stock_alerts"] = stock_alerts
+    return updated
 
 
 def delete_bill(conn: sqlite3.Connection, bill_id: int) -> dict:
@@ -455,38 +597,7 @@ def delete_bill(conn: sqlite3.Connection, bill_id: int) -> dict:
     try:
         conn.execute("BEGIN IMMEDIATE")
 
-        # Put the stock back exactly as it was: a purchase added, so subtract;
-        # a sale removed, so add.
-        movements = conn.execute(
-            "SELECT product_id, direction, quantity FROM stock_movement "
-            "WHERE bill_id = ?",
-            (bill_id,),
-        ).fetchall()
-        for movement in movements:
-            product = conn.execute(
-                "SELECT quantity FROM product WHERE id = ?",
-                (int(movement["product_id"]),),
-            ).fetchone()
-            if product is None:
-                continue
-            current = Decimal(str(product["quantity"]))
-            moved = Decimal(str(movement["quantity"]))
-            restored = (
-                current - moved if movement["direction"] == "in" else current + moved
-            )
-            conn.execute(
-                "UPDATE product SET quantity = ?, updated_at = ? WHERE id = ?",
-                (_quantity_text(restored), _now(), int(movement["product_id"])),
-            )
-        conn.execute("DELETE FROM stock_movement WHERE bill_id = ?", (bill_id,))
-        conn.execute("DELETE FROM cashbook_entry WHERE bill_id = ?", (bill_id,))
-
-        # The ledger row carries no bill_id, so it is matched on the note that
-        # finalization wrote for exactly this bill and party.
-        conn.execute(
-            'DELETE FROM "transaction" WHERE party_id = ? AND note = ?',
-            (int(row["party_id"]), f"Bill {row['bill_number']}"),
-        )
+        _reverse_postings(conn, row)
 
         # bill_item goes with the bill through ON DELETE CASCADE.
         conn.execute("DELETE FROM bill WHERE id = ?", (bill_id,))

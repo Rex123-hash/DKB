@@ -1090,3 +1090,60 @@ def test_deleting_a_missing_bill_is_reported_not_silently_ignored():
     conn = _conn()
     with pytest.raises(KeyError):
         repository.delete_bill(conn, 9999)
+
+
+def test_editing_a_bill_moves_the_stock_by_the_difference_only():
+    conn = _conn()
+    bill = repository.finalize_draft(conn, _saved_draft(conn, _draft(
+        bill_type="purchase", payment_status="paid",
+        items=[{"name": "Rice", "quantity": "10", "unit": "kg",
+                "unit_price_paise": 5000, "written_total_paise": 50000}],
+    )))
+    assert conn.execute("SELECT quantity FROM product WHERE name='Rice'").fetchone()[0] == "10"
+
+    corrected = _draft(
+        bill_type="purchase", payment_status="paid",
+        items=[{"name": "Rice", "quantity": "4", "unit": "kg",
+                "unit_price_paise": 5000, "written_total_paise": 20000}],
+    )
+    updated = repository.update_bill(conn, bill["id"], corrected)
+
+    assert updated["id"] == bill["id"]              # identity is kept
+    assert updated["grand_total_paise"] == 20000
+    assert conn.execute("SELECT quantity FROM product WHERE name='Rice'").fetchone()[0] == "4"
+    assert conn.execute("SELECT COUNT(*) FROM stock_movement").fetchone()[0] == 1
+    assert conn.execute("SELECT COUNT(*) FROM bill_item").fetchone()[0] == 1
+
+
+def test_editing_a_bill_re_posts_cash_and_ledger_once():
+    conn = _conn()
+    bill = repository.finalize_draft(conn, _saved_draft(conn, _draft(payment_status="paid")))
+    assert conn.execute("SELECT COUNT(*) FROM cashbook_entry").fetchone()[0] == 1
+    assert conn.execute('SELECT COUNT(*) FROM "transaction"').fetchone()[0] == 0
+
+    # Paid becomes credit: the cash entry must go, a receivable must appear.
+    repository.update_bill(conn, bill["id"], _draft(payment_status="credit"))
+
+    assert conn.execute("SELECT COUNT(*) FROM cashbook_entry").fetchone()[0] == 0
+    ledger = conn.execute('SELECT type, amount FROM "transaction"').fetchall()
+    assert len(ledger) == 1 and ledger[0]["type"] == "credit"
+
+
+def test_an_edit_that_does_not_add_up_is_refused_and_changes_nothing():
+    conn = _conn()
+    bill = repository.finalize_draft(conn, _saved_draft(conn, _draft(payment_status="paid")))
+    broken = _draft(payment_status=None)          # missing a required answer
+
+    with pytest.raises(ValueError):
+        repository.update_bill(conn, bill["id"], broken)
+
+    # The original posting must survive an refused edit untouched.
+    assert repository.get_bill(conn, bill["id"])["payment_status"] == "paid"
+    assert conn.execute("SELECT quantity FROM product WHERE name='Rice'").fetchone()[0] == "-2"
+    assert conn.execute("SELECT COUNT(*) FROM cashbook_entry").fetchone()[0] == 1
+
+
+def test_editing_a_missing_bill_is_reported():
+    conn = _conn()
+    with pytest.raises(KeyError):
+        repository.update_bill(conn, 4242, _draft())
