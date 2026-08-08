@@ -1026,3 +1026,67 @@ def test_a_clarification_that_supplies_items_does_replace_them():
         ]),
     )
     assert [item.name for item in merged.items] == ["Dal"]
+
+
+def test_deleting_a_bill_puts_the_stock_back():
+    conn = _conn()
+    bill = repository.finalize_draft(conn, _saved_draft(conn, _draft(
+        bill_type="purchase", payment_status="paid",
+        items=[{"name": "Rice", "quantity": "8", "unit": "kg",
+                "unit_price_paise": 5000, "written_total_paise": 40000}],
+    )))
+    assert conn.execute("SELECT quantity FROM product WHERE name='Rice'").fetchone()[0] == "8"
+
+    repository.delete_bill(conn, bill["id"])
+
+    assert conn.execute("SELECT quantity FROM product WHERE name='Rice'").fetchone()[0] == "0"
+    assert conn.execute("SELECT COUNT(*) FROM stock_movement").fetchone()[0] == 0
+
+
+def test_deleting_a_bill_removes_its_cashbook_and_ledger_entries():
+    conn = _conn()
+    paid = repository.finalize_draft(conn, _saved_draft(conn, _draft(payment_status="paid")))
+    assert conn.execute("SELECT COUNT(*) FROM cashbook_entry").fetchone()[0] == 1
+    repository.delete_bill(conn, paid["id"])
+    assert conn.execute("SELECT COUNT(*) FROM cashbook_entry").fetchone()[0] == 0
+
+    credit = repository.finalize_draft(conn, _saved_draft(conn, _draft(payment_status="credit")))
+    assert conn.execute('SELECT COUNT(*) FROM "transaction"').fetchone()[0] == 1
+    repository.delete_bill(conn, credit["id"])
+    assert conn.execute('SELECT COUNT(*) FROM "transaction"').fetchone()[0] == 0
+
+
+def test_deleting_a_bill_leaves_no_orphan_rows_or_draft():
+    conn = _conn()
+    draft_id = _saved_draft(conn, _draft())
+    bill = repository.finalize_draft(conn, draft_id)
+    repository.delete_bill(conn, bill["id"])
+
+    for table in ("bill", "bill_item", "stock_movement", "cashbook_entry"):
+        assert conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0] == 0, table
+    # The draft must become re-usable, not stay stuck as a finalized shell.
+    row = conn.execute(
+        "SELECT status, bill_id FROM bill_draft WHERE id = ?", (draft_id,)
+    ).fetchone()
+    assert row["bill_id"] is None and row["status"] != "finalized"
+
+
+def test_deleting_one_bill_does_not_disturb_another():
+    conn = _conn()
+    keep = repository.finalize_draft(conn, _saved_draft(conn, _draft(
+        bill_number="KEEP-1", payment_status="credit")))
+    drop = repository.finalize_draft(conn, _saved_draft(conn, _draft(
+        bill_number="DROP-1", payment_status="credit")))
+
+    repository.delete_bill(conn, drop["id"])
+
+    assert [r["bill_number"] for r in conn.execute("SELECT bill_number FROM bill")] == ["KEEP-1"]
+    notes = [r["note"] for r in conn.execute('SELECT note FROM "transaction"')]
+    assert notes == ["Bill KEEP-1"]
+    assert repository.get_bill(conn, keep["id"])["grand_total_paise"] == keep["grand_total_paise"]
+
+
+def test_deleting_a_missing_bill_is_reported_not_silently_ignored():
+    conn = _conn()
+    with pytest.raises(KeyError):
+        repository.delete_bill(conn, 9999)

@@ -392,6 +392,15 @@ def get_bill(bill_id: int, conn=Depends(get_conn)) -> dict:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
+@app.delete("/bills/{bill_id}")
+def delete_bill(bill_id: int, conn=Depends(get_conn)) -> dict:
+    """Delete a wrongly entered bill and reverse everything it posted."""
+    try:
+        return billing_repository.delete_bill(conn, bill_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
 @app.get("/bills/{bill_id}/pdf")
 def download_bill_pdf(bill_id: int, conn=Depends(get_conn)) -> Response:
     """Download a professional DukanBook-branded finalized bill."""

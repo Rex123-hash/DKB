@@ -154,3 +154,35 @@ def test_bill_summary_and_list_support_parallel_browser_requests(client):
         bills = list_future.result()
     assert summary.status_code == 200
     assert bills.status_code == 200
+
+
+def _post_a_bill(client, session: str = "delete-flow") -> dict:
+    """Scan -> review -> confirm, the same path the assistant drives."""
+    draft = client.post(
+        "/bill-drafts/scan",
+        files={"file": ("handwritten.jpg", b"\xff\xd8\xfffake-image", "image/jpeg")},
+        data={"session_id": session},
+    ).json()
+    client.put(f"/bill-drafts/{draft['id']}", json={"data": complete_purchase()})
+    return client.post(f"/bill-drafts/{draft['id']}/confirm").json()
+
+
+def test_delete_bill_endpoint_reverses_the_posting(client):
+    bill = _post_a_bill(client)
+    assert client.get("/stock").json()[0]["quantity"] == "2"
+    assert client.get("/cashbook").json() != []
+
+    removed = client.delete(f"/bills/{bill['id']}")
+    assert removed.status_code == 200
+    assert removed.json()["bill_number"] == "PUR-104"
+
+    assert client.get("/bills").json() == []
+    assert client.get("/cashbook").json() == []
+    assert client.get(f"/bills/{bill['id']}").status_code == 404
+    # The stock the purchase added is taken back off the shelf.
+    assert client.get("/stock").json()[0]["quantity"] == "0"
+    assert client.get("/bills/summary").json()["total_purchases_paise"] == 0
+
+
+def test_deleting_an_unknown_bill_returns_404(client):
+    assert client.delete("/bills/424242").status_code == 404

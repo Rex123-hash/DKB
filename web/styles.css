@@ -387,3 +387,15 @@ button:focus-visible,input:focus-visible,a:focus-visible{outline:3px solid rgba(
   background: var(--brand, #11C5C5); border-color: var(--brand, #11C5C5); color: #fff;
 }
 .speak-toggle:active { transform: scale(.94); }
+
+/* ---- destructive action (delete bill) ---- */
+.btn-danger{width:100%;margin-top:10px;padding:13px;border:1px solid #E0392B;
+  border-radius:12px;background:transparent;color:#E0392B;font-family:inherit;
+  font-size:.95rem;font-weight:600;cursor:pointer;transition:background .15s}
+.btn-danger:hover{background:rgba(224,57,43,.08)}
+.btn-danger:disabled{opacity:.55;cursor:default}
+.review-actions .btn-danger{width:auto;margin-top:0;flex:1;
+  background:#E0392B;border-color:#E0392B;color:#fff}
+.review-actions .btn-danger:hover{background:#c73125}
+.delete-effects{margin:8px 0 0;padding-left:18px;line-height:1.55}
+.delete-effects li{margin-bottom:3px}

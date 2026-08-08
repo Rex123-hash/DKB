@@ -451,10 +451,52 @@ async function openBillDetail(id) {
         <div class="screen-sub">${bill.gst_mode === "gst" ? `GST · ${esc(bill.gst_rate || "0")}%` : "Non-GST"} · ${esc(bill.payment_status)}</div>
       </div>
       <a class="btn-primary download-bill" href="/bills/${bill.id}/pdf" download>Download professional PDF</a>
-      <button class="btn-ghost" id="anotherBill">Scan another bill with AI</button>`;
+      <button class="btn-ghost" id="anotherBill">Scan another bill with AI</button>
+      <button class="btn-danger" id="deleteBill">${chatIcon("trash")} Delete this bill</button>`;
     $("#back").onclick = () => { state.nav = "bills"; renderBills(); };
     $("#anotherBill").onclick = openBillScannerInChat;
+    $("#deleteBill").onclick = () => confirmDeleteBill(bill);
   } catch { toast("Bill could not be loaded"); }
+}
+
+// Deleting a bill is not just removing a row: it puts stock back, drops the
+// cashbook entry and clears what the party owed. Spell that out before doing it.
+function confirmDeleteBill(bill) {
+  const stockWord = bill.type === "purchase" ? "kam" : "wapas";
+  const due = Number(bill.due_rupees || 0);
+  showModal(`<div class="bill-review">
+    <div class="review-title"><div><h3>Ye bill delete karein?</h3>
+      <div class="screen-sub">${esc(bill.bill_number)} · ${esc(bill.party_name)} · ${fmtPaise(bill.grand_total_paise)}</div></div>
+      <button class="close-x" id="cancel">×</button></div>
+    <div class="missing-box"><b>Ye wapas nahi aayega.</b> Iske saath ye bhi undo hoga:
+      <ul class="delete-effects">
+        <li>${(bill.items || []).length} item ka stock ${stockWord} ho jayega</li>
+        ${Number(bill.paid_paise) ? `<li>Cashbook se ${fmtPaise(bill.paid_paise)} ki entry hat jayegi</li>` : ""}
+        ${due ? `<li>${esc(bill.party_name)} ka ${fmt(due)} ka hisaab hat jayega</li>` : ""}
+        <li>PDF dobara download nahi ho payega</li>
+      </ul>
+    </div>
+    <div class="review-actions">
+      <button class="btn-ghost" id="keepBill">Rehne dijiye</button>
+      <button class="btn-danger" id="reallyDelete">Haan, delete karein</button>
+    </div>
+  </div>`);
+  $("#cancel").onclick = closeModal;
+  $("#keepBill").onclick = closeModal;
+  $("#reallyDelete").onclick = async () => {
+    $("#reallyDelete").disabled = true;
+    try {
+      await api(`/bills/${bill.id}`, { method: "DELETE" });
+      closeModal();
+      toast(`Bill ${bill.bill_number} delete ho gaya`);
+      state.nav = "bills";
+      await loadData();
+      renderBills();
+    } catch {
+      $("#reallyDelete").disabled = false;
+      toast("Bill delete nahi ho paya — dobara try kijiye");
+    }
+  };
 }
 
 async function openCashbook() {

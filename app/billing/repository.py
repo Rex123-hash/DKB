@@ -433,6 +433,79 @@ def finalize_draft(conn: sqlite3.Connection, draft_id: str) -> dict:
         raise
 
 
+def delete_bill(conn: sqlite3.Connection, bill_id: int) -> dict:
+    """Remove a finalized bill and unwind everything finalizing it posted.
+
+    A wrong bill is not just a row: it moved stock, may have written a cashbook
+    entry, and may have left the party owing money. Deleting the row alone
+    would leave the shop's stock and ledger permanently wrong, so every side
+    effect is reversed in the same transaction that removes the bill.
+    """
+    row = conn.execute("SELECT * FROM bill WHERE id = ?", (bill_id,)).fetchone()
+    if row is None:
+        raise KeyError(f"bill {bill_id} not found")
+
+    removed = {
+        "id": bill_id,
+        "bill_number": row["bill_number"],
+        "type": row["type"],
+        "party_name": row["party_name"],
+        "grand_total_paise": row["grand_total_paise"],
+    }
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+
+        # Put the stock back exactly as it was: a purchase added, so subtract;
+        # a sale removed, so add.
+        movements = conn.execute(
+            "SELECT product_id, direction, quantity FROM stock_movement "
+            "WHERE bill_id = ?",
+            (bill_id,),
+        ).fetchall()
+        for movement in movements:
+            product = conn.execute(
+                "SELECT quantity FROM product WHERE id = ?",
+                (int(movement["product_id"]),),
+            ).fetchone()
+            if product is None:
+                continue
+            current = Decimal(str(product["quantity"]))
+            moved = Decimal(str(movement["quantity"]))
+            restored = (
+                current - moved if movement["direction"] == "in" else current + moved
+            )
+            conn.execute(
+                "UPDATE product SET quantity = ?, updated_at = ? WHERE id = ?",
+                (_quantity_text(restored), _now(), int(movement["product_id"])),
+            )
+        conn.execute("DELETE FROM stock_movement WHERE bill_id = ?", (bill_id,))
+        conn.execute("DELETE FROM cashbook_entry WHERE bill_id = ?", (bill_id,))
+
+        # The ledger row carries no bill_id, so it is matched on the note that
+        # finalization wrote for exactly this bill and party.
+        conn.execute(
+            'DELETE FROM "transaction" WHERE party_id = ? AND note = ?',
+            (int(row["party_id"]), f"Bill {row['bill_number']}"),
+        )
+
+        # bill_item goes with the bill through ON DELETE CASCADE.
+        conn.execute("DELETE FROM bill WHERE id = ?", (bill_id,))
+
+        # Hand the scan back to the shopkeeper instead of stranding it as a
+        # finalized shell, so a corrected bill can be posted from it.
+        if row["draft_id"]:
+            conn.execute(
+                "UPDATE bill_draft SET bill_id = NULL, status = 'ready_for_review', "
+                "updated_at = ? WHERE id = ?",
+                (_now(), row["draft_id"]),
+            )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    return removed
+
+
 def get_bill(conn: sqlite3.Connection, bill_id: int) -> dict:
     row = conn.execute(
         """
