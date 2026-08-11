@@ -184,6 +184,22 @@ def test_delete_bill_endpoint_reverses_the_posting(client):
     assert client.get("/bills/summary").json()["total_purchases_paise"] == 0
 
 
+def test_party_with_finalized_bill_must_delete_bill_first(client):
+    bill = _post_a_bill(client, session="party-delete-guard")
+    party = next(
+        row for row in client.get("/parties").json()
+        if row["name"] == "Sharma Wholesale"
+    )
+
+    blocked = client.delete(f"/parties/{party['id']}")
+    assert blocked.status_code == 409
+    assert "delete those bills first" in blocked.text
+    assert client.get(f"/parties/{party['id']}").status_code == 200
+
+    assert client.delete(f"/bills/{bill['id']}").status_code == 200
+    assert client.delete(f"/parties/{party['id']}").status_code == 200
+
+
 def test_deleting_an_unknown_bill_returns_404(client):
     assert client.delete("/bills/424242").status_code == 404
 

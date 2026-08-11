@@ -328,6 +328,7 @@ async function openDetail(id) {
     <div class="chip-row">${phoneBlock}
       <button class="chip" id="remindBtn">${chatIcon("clock")} Set reminder</button>
     </div>
+    <button class="btn-danger" id="deleteParty">${chatIcon("trash")} Delete account</button>
     <div class="section-title">History</div>
     <div class="list">${d.transactions.length
       ? d.transactions.slice().reverse().map(txnHTML).join("")
@@ -337,8 +338,50 @@ async function openDetail(id) {
   $("#giveBtn").onclick = () => txnModal(p, "credit");   // you gave udhaar -> they owe you (get)
   $("#getBtn").onclick = () => txnModal(p, "debit");     // you received -> reduces what they owe
   $("#remindBtn").onclick = () => reminderModal(p);
+  $("#deleteParty").onclick = () => confirmDeleteParty(p, d);
   if ($("#addPhone")) $("#addPhone").onclick = () => phoneModal(p);
 }
+
+function confirmDeleteParty(party, detail) {
+  const transactionCount = (detail.transactions || []).length;
+  const balance = Number(detail.balance || 0);
+  showModal(`<div class="bill-review">
+    <div class="review-title"><div><h3>Delete ${esc(party.name)}'s account?</h3>
+      <div class="screen-sub">${esc(party.type)}${balance ? ` · Current balance ${fmt(balance)}` : " · Settled"}</div></div>
+      <button class="close-x" id="cancel" aria-label="Close">×</button></div>
+    <div class="missing-box"><b>This cannot be undone.</b>
+      <ul class="delete-effects">
+        <li>The account and ${transactionCount} transaction(s) will be deleted</li>
+        <li>All reminders for this account will be deleted</li>
+        <li>Accounts with finalized bills must have those bills deleted first</li>
+      </ul>
+    </div>
+    <div class="review-actions">
+      <button class="btn-ghost" id="keepParty">Keep account</button>
+      <button class="btn-danger" id="reallyDeleteParty">Yes, delete account</button>
+    </div>
+  </div>`);
+  $("#cancel").onclick = closeModal;
+  $("#keepParty").onclick = closeModal;
+  $("#reallyDeleteParty").onclick = async () => {
+    $("#reallyDeleteParty").disabled = true;
+    try {
+      await api(`/parties/${party.id}`, { method: "DELETE" });
+      closeModal();
+      toast(`${party.name}'s account was deleted`);
+      state.tab = party.type;
+      state.nav = "home";
+      await loadData();
+      render();
+    } catch (error) {
+      $("#reallyDeleteParty").disabled = false;
+      toast(/finalized bill/i.test(error.message || "")
+        ? "Delete this account's finalized bills first"
+        : "Account could not be deleted — try again");
+    }
+  };
+}
+
 function txnHTML(t) {
   const cls = t.type === "credit" ? "get" : "give";
   const sign = t.type === "credit" ? "+" : "−";

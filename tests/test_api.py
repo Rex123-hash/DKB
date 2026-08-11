@@ -42,6 +42,33 @@ def test_transaction_unknown_party_404(client):
     assert r.status_code == 404
 
 
+def test_delete_party_removes_account_transactions_and_reminders(client):
+    pid = client.post(
+        "/parties",
+        json={"name": "Amin", "type": "customer", "phone": "9876543210"},
+    ).json()["id"]
+    client.post(
+        "/transactions",
+        json={"party_id": pid, "type": "credit", "amount": 500},
+    )
+    client.post(
+        "/reminders",
+        json={"party_id": pid, "due_at": "2026-08-12T10:00:00", "amount": 500},
+    )
+
+    deleted = client.delete(f"/parties/{pid}")
+
+    assert deleted.status_code == 200
+    assert deleted.json()["deleted_transactions"] == 1
+    assert deleted.json()["deleted_reminders"] == 1
+    assert client.get(f"/parties/{pid}").status_code == 404
+    assert client.get("/reminders").json() == []
+
+
+def test_delete_unknown_party_returns_404(client):
+    assert client.delete("/parties/999").status_code == 404
+
+
 def test_chat_still_works(client):
     r = client.post("/chat", json={"message": "namaste"})
     assert r.status_code == 200 and "reply" in r.json()

@@ -241,6 +241,16 @@ def set_party_phone(party_id: int, body: PhoneIn, conn=Depends(get_conn)) -> dic
     return {"id": party_id, "phone": normalized}
 
 
+@app.delete("/parties/{party_id}")
+def delete_party(party_id: int, conn=Depends(get_conn)) -> dict:
+    try:
+        return db.delete_party(conn, party_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
 @app.post("/transactions")
 def add_transaction(t: TransactionIn, conn=Depends(get_conn)) -> dict:
     if db.get_party(conn, t.party_id) is None:

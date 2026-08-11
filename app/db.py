@@ -395,6 +395,47 @@ def get_party(conn: sqlite3.Connection, party_id: int):
     return conn.execute("SELECT * FROM party WHERE id = ?", (party_id,)).fetchone()
 
 
+def delete_party(conn: sqlite3.Connection, party_id: int) -> dict:
+    """Delete ledger data unless finalized bills still reference the party."""
+    party = get_party(conn, party_id)
+    if party is None:
+        raise KeyError("party not found")
+    bill_count = int(
+        conn.execute(
+            "SELECT COUNT(*) AS count FROM bill WHERE party_id = ?", (party_id,)
+        ).fetchone()["count"]
+    )
+    if bill_count:
+        raise ValueError(
+            f"account has {bill_count} finalized bill(s); delete those bills first"
+        )
+    transaction_count = int(
+        conn.execute(
+            'SELECT COUNT(*) AS count FROM "transaction" WHERE party_id = ?',
+            (party_id,),
+        ).fetchone()["count"]
+    )
+    reminder_count = int(
+        conn.execute(
+            "SELECT COUNT(*) AS count FROM reminder WHERE party_id = ?", (party_id,)
+        ).fetchone()["count"]
+    )
+    try:
+        conn.execute("DELETE FROM reminder WHERE party_id = ?", (party_id,))
+        conn.execute('DELETE FROM "transaction" WHERE party_id = ?', (party_id,))
+        conn.execute("DELETE FROM party WHERE id = ?", (party_id,))
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    return {
+        "id": party_id,
+        "name": party["name"],
+        "deleted_transactions": transaction_count,
+        "deleted_reminders": reminder_count,
+    }
+
+
 def get_transactions(conn: sqlite3.Connection, party_id: int):
     return conn.execute(
         'SELECT * FROM "transaction" WHERE party_id = ? ORDER BY id DESC',
