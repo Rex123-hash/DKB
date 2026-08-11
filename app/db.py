@@ -11,6 +11,7 @@ A positive balance means the party still owes the shopkeeper.
 """
 from __future__ import annotations
 
+import json
 import os
 import sqlite3
 from datetime import datetime, timezone
@@ -75,6 +76,13 @@ CREATE TABLE IF NOT EXISTS trace_event (
     payload_json TEXT NOT NULL,
     latency_ms   REAL,
     created_at   TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS assistant_session (
+    session_id   TEXT PRIMARY KEY,
+    state_json   TEXT,
+    context_json TEXT,
+    updated_at   TEXT NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS bill_draft (
@@ -335,6 +343,56 @@ def list_traces(conn: sqlite3.Connection, limit: int = 25):
         """,
         (max(1, min(int(limit), 500)),),
     ).fetchall()
+
+
+def get_assistant_session(conn: sqlite3.Connection, session_id: str) -> dict | None:
+    """Load a pending multi-turn workflow for one browser session."""
+    row = conn.execute(
+        "SELECT state_json, context_json FROM assistant_session WHERE session_id = ?",
+        (session_id,),
+    ).fetchone()
+    if row is None:
+        return None
+    try:
+        state = json.loads(row["state_json"]) if row["state_json"] else None
+        context = json.loads(row["context_json"]) if row["context_json"] else None
+    except (TypeError, ValueError, json.JSONDecodeError):
+        # Corrupt pending state must not trap the user or break normal chat.
+        conn.execute("DELETE FROM assistant_session WHERE session_id = ?", (session_id,))
+        conn.commit()
+        return None
+    return {"state": state, "context": context}
+
+
+def save_assistant_session(
+    conn: sqlite3.Connection,
+    session_id: str,
+    state: dict | None,
+    context: dict | None,
+) -> None:
+    """Upsert a pending dialog, or remove it when the workflow is complete."""
+    if not state and not context:
+        conn.execute("DELETE FROM assistant_session WHERE session_id = ?", (session_id,))
+        conn.commit()
+        return
+    conn.execute(
+        """
+        INSERT INTO assistant_session (
+            session_id, state_json, context_json, updated_at
+        ) VALUES (?, ?, ?, ?)
+        ON CONFLICT(session_id) DO UPDATE SET
+            state_json = excluded.state_json,
+            context_json = excluded.context_json,
+            updated_at = excluded.updated_at
+        """,
+        (
+            session_id,
+            json.dumps(state, ensure_ascii=False, separators=(",", ":")) if state else None,
+            json.dumps(context, ensure_ascii=False, separators=(",", ":")) if context else None,
+            _now(),
+        ),
+    )
+    conn.commit()
 
 
 def add_party(conn: sqlite3.Connection, name: str, type: str, phone: str | None = None) -> int:

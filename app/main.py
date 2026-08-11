@@ -8,6 +8,7 @@ Both read/write the SAME SQLite DB, so data stays consistent across modules.
 from __future__ import annotations
 
 import base64
+import json
 import os
 from contextlib import asynccontextmanager
 from typing import Literal
@@ -75,12 +76,14 @@ class ChatRequest(BaseModel):
     lang: str = "auto"
     session_id: str = "default"
     speak: bool = False
+    assistant_session: dict | None = None
 
 
 class ChatResponse(BaseModel):
     reply: str
     llm: bool = False
     audio_b64: str | None = None
+    assistant_session: dict | None = None
 
 
 class PartyIn(BaseModel):
@@ -122,7 +125,12 @@ def health() -> dict:
 # ---- AI Assistant (separate module) ----
 @app.post("/chat", response_model=ChatResponse)
 def chat(req: ChatRequest) -> ChatResponse:
-    reply = brain.respond(req.message, req.lang, session_id=req.session_id)
+    reply = brain.respond(
+        req.message,
+        req.lang,
+        session_id=req.session_id,
+        resume_session=req.assistant_session,
+    )
     audio_b64 = None
     if req.speak and config.has_voice():
         # Speak-while-typing is opt-in. A TTS failure must never cost the user
@@ -133,7 +141,12 @@ def chat(req: ChatRequest) -> ChatResponse:
                 audio_b64 = base64.b64encode(out).decode()
         except Exception:
             pass
-    return ChatResponse(reply=reply, llm=config.has_llm(), audio_b64=audio_b64)
+    return ChatResponse(
+        reply=reply,
+        llm=config.has_llm(),
+        audio_b64=audio_b64,
+        assistant_session=brain.session_snapshot(req.session_id),
+    )
 
 
 class SpeakRequest(BaseModel):
@@ -162,6 +175,7 @@ def voice_chat(
     file: UploadFile = File(...),
     session_id: str = Form("default"),
     duration_ms: int = Form(0),
+    assistant_session: str = Form(""),
 ) -> dict:
     """Audio in -> transcribe -> brain -> reply (+ TTS audio out).
 
@@ -197,7 +211,20 @@ def voice_chat(
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     except Exception as exc:
         raise HTTPException(status_code=502, detail=f"voice transcription failed: {exc}") from exc
-    reply = brain.respond(stt["text"], stt["lang"], session_id=session_id)
+    resume_session = None
+    if assistant_session:
+        try:
+            resume_session = json.loads(assistant_session)
+            if not isinstance(resume_session, dict):
+                raise ValueError("assistant session must be an object")
+        except (TypeError, ValueError, json.JSONDecodeError) as exc:
+            raise HTTPException(status_code=422, detail="invalid assistant session") from exc
+    reply = brain.respond(
+        stt["text"],
+        stt["lang"],
+        session_id=session_id,
+        resume_session=resume_session,
+    )
     audio_b64 = None
     try:
         out = voice.synthesize(reply, stt["lang"])
@@ -211,6 +238,7 @@ def voice_chat(
         "reply": reply,
         "audio_b64": audio_b64,
         "llm": config.has_llm(),
+        "assistant_session": brain.session_snapshot(session_id),
     }
 
 

@@ -1,6 +1,16 @@
 /* ===== DukanBook web replica — talks to the FastAPI backend (same origin) ===== */
 const API = ""; // same origin as FastAPI
 
+function storedAssistantSession() {
+  try {
+    const value = JSON.parse(localStorage.getItem("db_assistant_session") || "null");
+    return value && typeof value === "object" ? value : null;
+  } catch {
+    localStorage.removeItem("db_assistant_session");
+    return null;
+  }
+}
+
 const state = {
   tab: "customer",      // customer | supplier
   nav: "home",          // home | stock | bills | menu
@@ -9,6 +19,7 @@ const state = {
   // Speak-while-typing. A spoken question is always answered aloud
   // regardless of this switch; it only governs typed messages.
   speakReplies: localStorage.getItem("db_speak_replies") === "1",
+  assistantSession: storedAssistantSession(),
   parties: [],
   search: "",
   sessionId: localStorage.getItem("db_sid") || (() => {
@@ -38,6 +49,16 @@ const putJSON = (path, body) =>
 const getBills = (type) => api("/bills" + (type ? "?type=" + encodeURIComponent(type) : ""));
 const getBillSummary = () => api("/bills/summary");
 const getStock = () => api("/stock");
+
+function rememberAssistantSession(response) {
+  if (!response || !Object.prototype.hasOwnProperty.call(response, "assistant_session")) return;
+  state.assistantSession = response.assistant_session || null;
+  if (state.assistantSession) {
+    localStorage.setItem("db_assistant_session", JSON.stringify(state.assistantSession));
+  } else {
+    localStorage.removeItem("db_assistant_session");
+  }
+}
 
 /* ---------- helpers ---------- */
 const $ = (sel) => document.querySelector(sel);
@@ -776,7 +797,9 @@ Khata update karein, reminder banayein, business sawal poochhein, ya handwritten
       } else {
         const r = await postJSON("/chat", {
           message: msg, session_id: state.sessionId, speak: state.speakReplies,
+          assistant_session: state.assistantSession,
         }, { signal: activeResponseAbort.signal });
+        rememberAssistantSession(r);
         stopBubbleLoading(typing);
         typing.innerHTML = linkify(r.reply);
         if (r.audio_b64) queueReplyAudio(r.audio_b64);
@@ -1334,13 +1357,19 @@ async function sendVoice(blob, durationMs = 0) {
     const fd = new FormData();
     fd.append("file", blob, "audio.webm");
     fd.append("duration_ms", String(Math.round(durationMs)));
-    if (!state.activeDraftId) fd.append("session_id", state.sessionId);
+    if (!state.activeDraftId) {
+      fd.append("session_id", state.sessionId);
+      if (state.assistantSession) {
+        fd.append("assistant_session", JSON.stringify(state.assistantSession));
+      }
+    }
     const path = state.activeDraftId
       ? `/bill-drafts/${state.activeDraftId}/voice-answer`
       : "/voice/chat";
     const res = await fetch(path, { method: "POST", body: fd, signal: activeResponseAbort.signal });
     if (!res.ok) throw new Error(await res.text());
     const data = await res.json();
+    if (!state.activeDraftId) rememberAssistantSession(data);
     const transcript = typeof data.transcript === "object"
       ? data.transcript.text : data.transcript;
     stopBubbleLoading(youSaid);

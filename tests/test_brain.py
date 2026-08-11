@@ -164,6 +164,81 @@ def test_reminder_without_phone_waits_for_phone_or_skip(conn):
     assert db.list_reminders(conn)[0]["phone"] == "9123456780"
 
 
+def test_reminder_followups_survive_process_memory_loss(conn):
+    """A new Cloud Run worker must continue amount/phone collection."""
+    from app import tools
+
+    tools.create_accounts(conn, ["Amin"])
+    s = "persisted-reminder"
+
+    first = brain.respond(
+        "Amin ko kal 5 baje payment reminder lagao",
+        conn=conn,
+        session_id=s,
+    )
+    assert "amount" in first.lower()
+    assert db.get_assistant_session(conn, s)["state"]["reminder"]["name"] == "Amin"
+
+    # Simulate the next request landing in a fresh process.
+    brain._SESSIONS.clear()
+    brain._SESSION_CONTEXT.clear()
+    second = brain.respond("750", conn=conn, session_id=s)
+    assert "10-digit" in second
+    assert db.get_transactions(conn, db.find_party_by_name(conn, "Amin")["id"]) == []
+
+    # Lose process memory again before the phone answer.
+    brain._SESSIONS.clear()
+    brain._SESSION_CONTEXT.clear()
+    done = brain.respond("9123456780", conn=conn, session_id=s)
+
+    assert "reminder laga diya" in done
+    reminder = db.list_reminders(conn)[0]
+    assert reminder["party_name"] == "Amin"
+    assert reminder["amount"] == 750
+    assert reminder["phone"] == "9123456780"
+    assert db.get_assistant_session(conn, s) is None
+
+
+def test_browser_carried_reminder_state_survives_missing_server_session(conn):
+    """Client state covers Cloud Run instances that do not share local SQLite."""
+    from app import tools
+
+    tools.create_accounts(conn, ["Sita"])
+    s = "client-carried-reminder"
+    first = brain.respond(
+        "Sita ko kal 5 baje payment reminder lagao",
+        conn=conn,
+        session_id=s,
+    )
+    assert "amount" in first.lower()
+    first_snapshot = brain.session_snapshot(s)
+
+    db.save_assistant_session(conn, s, None, None)
+    brain._SESSIONS.clear()
+    brain._SESSION_CONTEXT.clear()
+    second = brain.respond(
+        "900",
+        conn=conn,
+        session_id=s,
+        resume_session=first_snapshot,
+    )
+    assert "10-digit" in second
+    second_snapshot = brain.session_snapshot(s)
+
+    db.save_assistant_session(conn, s, None, None)
+    brain._SESSIONS.clear()
+    brain._SESSION_CONTEXT.clear()
+    done = brain.respond(
+        "9876543210",
+        conn=conn,
+        session_id=s,
+        resume_session=second_snapshot,
+    )
+
+    assert "reminder laga diya" in done
+    assert db.list_reminders(conn)[0]["amount"] == 900
+
+
 def test_reminder_without_phone_allows_explicit_skip(conn):
     from app import tools
     tools.create_accounts(conn, ["Mohan"])
@@ -217,6 +292,9 @@ def test_phone_followup_can_reference_recent_message(conn):
             "date_provided": True, "time_provided": True,
         },
     }
+    db.save_assistant_session(
+        conn, s, brain._SESSIONS[s], brain._SESSION_CONTEXT.get(s)
+    )
     out = brain.respond("upar wale message mein likha hai", conn=conn, session_id=s)
     assert "reminder laga diya" in out
     assert db.list_reminders(conn)[0]["phone"] == "9123456780"

@@ -74,6 +74,41 @@ def test_chat_still_works(client):
     assert r.status_code == 200 and "reply" in r.json()
 
 
+def test_chat_api_round_trips_pending_reminder_state(client):
+    client.post("/parties", json={"name": "Sita", "type": "customer"})
+    session_id = "api-reminder-context"
+    first = client.post(
+        "/chat",
+        json={
+            "message": "Sita ko kal 5 baje payment reminder lagao",
+            "session_id": session_id,
+        },
+    ).json()
+    assert "amount" in first["reply"].lower()
+    assert first["assistant_session"]["state"]["reminder"]["name"] == "Sita"
+
+    second = client.post(
+        "/chat",
+        json={
+            "message": "500",
+            "session_id": session_id,
+            "assistant_session": first["assistant_session"],
+        },
+    ).json()
+    assert "10-digit" in second["reply"]
+
+    done = client.post(
+        "/chat",
+        json={
+            "message": "9123456780",
+            "session_id": session_id,
+            "assistant_session": second["assistant_session"],
+        },
+    ).json()
+    assert "reminder laga diya" in done["reply"]
+    assert done["assistant_session"] is None
+
+
 def test_reminders_flow(client):
     pid = client.post(
         "/parties",

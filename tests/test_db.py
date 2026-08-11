@@ -52,6 +52,21 @@ def test_set_party_phone_persists():
     assert db.get_party(conn, pid)["phone"] == "9876543210"
 
 
+def test_assistant_session_round_trip_and_clear():
+    conn = _fresh()
+    state = {"awaiting": "reminder_amount_only", "reminder": {"name": "Amin"}}
+    context = {"turn": 2, "phone": "9876543210", "phone_turn": 1}
+
+    db.save_assistant_session(conn, "browser-1", state, context)
+    assert db.get_assistant_session(conn, "browser-1") == {
+        "state": state,
+        "context": context,
+    }
+
+    db.save_assistant_session(conn, "browser-1", None, None)
+    assert db.get_assistant_session(conn, "browser-1") is None
+
+
 def test_add_reminder_stores_all_fields():
     conn = _fresh()
     pid = db.add_party(conn, "Rahul", "customer")

@@ -75,7 +75,8 @@ def _smalltalk(message: str) -> str | None:
 # --- multi-turn conversation state (account-creation phone capture) ---
 # Keyed by session_id. Holds at most one pending action per session:
 #   {"awaiting": "phone", "queue": [{"id","name"}, ...], "retried": bool}
-# In-memory only — fine for a single-shopkeeper prototype; lost on restart.
+# These dictionaries are only a per-process working cache. ``respond`` reloads
+# them from SQLite on every turn and persists mutations before returning.
 _SESSIONS: dict[str, dict] = {}
 _SESSION_CONTEXT: dict[str, dict] = {}
 
@@ -104,7 +105,35 @@ def _is_collect(text: str) -> bool:
     return any(w in text for w in _COLLECT_WORDS)
 
 
-def respond(message: str, lang: str = "auto", conn=None, session_id: str = "default") -> str:
+def _hydrate_session(session_id: str, payload: dict | None) -> None:
+    """Replace the local working cache with a persisted/client-carried snapshot."""
+    state = payload.get("state") if isinstance(payload, dict) else None
+    context = payload.get("context") if isinstance(payload, dict) else None
+    valid_steps = {"phone", *_REMINDER_STEPS}
+    if isinstance(state, dict) and state.get("awaiting") in valid_steps:
+        _SESSIONS[session_id] = state
+    else:
+        _SESSIONS.pop(session_id, None)
+    if isinstance(context, dict):
+        _SESSION_CONTEXT[session_id] = context
+    else:
+        _SESSION_CONTEXT.pop(session_id, None)
+
+
+def session_snapshot(session_id: str) -> dict | None:
+    """Return the small pending-workflow payload the browser carries forward."""
+    state = _SESSIONS.get(session_id)
+    context = _SESSION_CONTEXT.get(session_id)
+    return {"state": state, "context": context} if state or context else None
+
+
+def respond(
+    message: str,
+    lang: str = "auto",
+    conn=None,
+    session_id: str = "default",
+    resume_session: dict | None = None,
+) -> str:
     if not (message or "").strip():
         return "Namaste! Boliye ya likhiye — jaise ‘Ramesh ko 500 udhaar likho’."
 
@@ -113,6 +142,16 @@ def respond(message: str, lang: str = "auto", conn=None, session_id: str = "defa
         conn = db.get_connection()
         db.init_db(conn)
     try:
+        # The browser sends a stable session_id, but consecutive Cloud Run
+        # requests are not guaranteed to use the same process. Treat SQLite as
+        # the source of truth so a bare amount/phone continues the pending flow.
+        persisted = (
+            resume_session
+            if isinstance(resume_session, dict)
+            else db.get_assistant_session(conn, session_id)
+        )
+        _hydrate_session(session_id, persisted)
+
         # Remember only explicit contact details for this browser session.
         explicit_phone = _parser._extract_phone(message)
         context = _SESSION_CONTEXT.get(session_id)
@@ -183,6 +222,12 @@ def respond(message: str, lang: str = "auto", conn=None, session_id: str = "defa
                 pass  # graceful fallback to the offline path
         return _offline_respond(message, conn)
     finally:
+        db.save_assistant_session(
+            conn,
+            session_id,
+            _SESSIONS.get(session_id),
+            _SESSION_CONTEXT.get(session_id),
+        )
         if own_conn:
             conn.close()
 
