@@ -37,7 +37,7 @@ body{
   padding:16px 18px 8px}
 .brand{font-size:1.5rem;font-weight:800;letter-spacing:-.5px}
 .brand-dukan{color:#fff}
-.brand-book{color:#00BFFF}
+.brand-book{color:#000080}
 .appbar-icons{display:flex;gap:6px}
 .icon-btn{background:transparent;border:none;color:#fff;font-size:1.15rem;
   width:38px;height:38px;border-radius:50%;cursor:pointer;position:relative;
