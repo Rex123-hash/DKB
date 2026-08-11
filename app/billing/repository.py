@@ -602,13 +602,21 @@ def delete_bill(conn: sqlite3.Connection, bill_id: int) -> dict:
         # bill_item goes with the bill through ON DELETE CASCADE.
         conn.execute("DELETE FROM bill WHERE id = ?", (bill_id,))
 
-        # Hand the scan back to the shopkeeper instead of stranding it as a
-        # finalized shell, so a corrected bill can be posted from it.
+        # Retire the scan cache together with the finalized bill. Duplicate
+        # detection is keyed by session_id + source_sha256 and deliberately
+        # ignores failed drafts. Leaving this row ready_for_review would make
+        # a later upload of the same hard-copy bill look as though the deleted
+        # bill still existed. The source record is kept for diagnosis, but it
+        # can no longer block or short-circuit a fresh scan.
         if row["draft_id"]:
             conn.execute(
-                "UPDATE bill_draft SET bill_id = NULL, status = 'ready_for_review', "
-                "updated_at = ? WHERE id = ?",
-                (_now(), row["draft_id"]),
+                "UPDATE bill_draft SET bill_id = NULL, status = 'failed', "
+                "error = ?, updated_at = ? WHERE id = ?",
+                (
+                    "Finalized bill deleted; a matching image may be scanned again.",
+                    _now(),
+                    row["draft_id"],
+                ),
             )
         conn.commit()
     except Exception:

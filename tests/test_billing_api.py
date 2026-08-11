@@ -184,6 +184,31 @@ def test_delete_bill_endpoint_reverses_the_posting(client):
     assert client.get("/bills/summary").json()["total_purchases_paise"] == 0
 
 
+def test_deleted_bill_can_be_scanned_again_from_the_same_image(client):
+    session = "delete-and-rescan"
+    image = b"\xff\xd8\xffsame-hard-copy-bill"
+
+    first = client.post(
+        "/bill-drafts/scan",
+        files={"file": ("handwritten.jpg", image, "image/jpeg")},
+        data={"session_id": session},
+    ).json()
+    client.put(f"/bill-drafts/{first['id']}", json={"data": complete_purchase()})
+    bill = client.post(f"/bill-drafts/{first['id']}/confirm").json()
+
+    assert client.delete(f"/bills/{bill['id']}").status_code == 200
+
+    second_response = client.post(
+        "/bill-drafts/scan",
+        files={"file": ("handwritten.jpg", image, "image/jpeg")},
+        data={"session_id": session},
+    )
+    assert second_response.status_code == 200
+    second = second_response.json()
+    assert second["id"] != first["id"]
+    assert second["duplicate"] is False
+
+
 def test_party_with_finalized_bill_must_delete_bill_first(client):
     bill = _post_a_bill(client, session="party-delete-guard")
     party = next(

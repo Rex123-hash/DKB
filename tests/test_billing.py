@@ -1056,7 +1056,7 @@ def test_deleting_a_bill_removes_its_cashbook_and_ledger_entries():
     assert conn.execute('SELECT COUNT(*) FROM "transaction"').fetchone()[0] == 0
 
 
-def test_deleting_a_bill_leaves_no_orphan_rows_or_draft():
+def test_deleting_a_bill_retires_its_draft_duplicate_cache():
     conn = _conn()
     draft_id = _saved_draft(conn, _draft())
     bill = repository.finalize_draft(conn, draft_id)
@@ -1064,11 +1064,16 @@ def test_deleting_a_bill_leaves_no_orphan_rows_or_draft():
 
     for table in ("bill", "bill_item", "stock_movement", "cashbook_entry"):
         assert conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0] == 0, table
-    # The draft must become re-usable, not stay stuck as a finalized shell.
+    # A deleted bill must not leave an active image-hash match behind. Failed
+    # drafts are retained for diagnosis but duplicate lookup ignores them.
     row = conn.execute(
-        "SELECT status, bill_id FROM bill_draft WHERE id = ?", (draft_id,)
+        "SELECT session_id, source_sha256, status, bill_id FROM bill_draft WHERE id = ?",
+        (draft_id,),
     ).fetchone()
-    assert row["bill_id"] is None and row["status"] != "finalized"
+    assert row["bill_id"] is None and row["status"] == "failed"
+    assert repository.find_duplicate_draft(
+        conn, row["session_id"], row["source_sha256"]
+    ) is None
 
 
 def test_deleting_one_bill_does_not_disturb_another():
