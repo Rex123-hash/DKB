@@ -191,3 +191,69 @@ def test_reminder_tracks_missing_date_and_time_without_treating_defaults_as_user
     missing_date = parse("Ram ko 6 PM 500 ka reminder lagao")
     assert missing_date.reminder_date_provided is False
     assert missing_date.reminder_time_provided is True
+
+
+# --- multi-word party names -------------------------------------------------
+
+@pytest.mark.parametrize(
+    "msg, expected",
+    [
+        ("akash sharma ka khata kholo", ["akash sharma"]),
+        ("verma traders ka khaata banao", ["verma traders"]),
+        ("bajrang kirana stores ka account banao", ["bajrang kirana stores"]),
+        ("Ramesh ka khaata banao", ["Ramesh"]),
+        ("naya khata banao akash sharma ke liye", ["akash sharma"]),
+    ],
+)
+def test_a_multi_word_name_becomes_one_account(msg, expected):
+    """'akash sharma' is one customer, not two."""
+    assert parse(msg).names == expected
+
+
+@pytest.mark.parametrize(
+    "msg, expected",
+    [
+        ("ramesh aur suresh ka khata banao", ["ramesh", "suresh"]),
+        ("ramesh, suresh ka khaata banao", ["ramesh", "suresh"]),
+        ("verma traders aur akash sharma ka khata banao",
+         ["verma traders", "akash sharma"]),
+        ("ramesh and suresh ka account banao", ["ramesh", "suresh"]),
+    ],
+)
+def test_separators_still_create_several_accounts(msg, expected):
+    """Only an explicit 'aur'/'and'/comma splits one name from the next."""
+    assert parse(msg).names == expected
+
+
+@pytest.mark.parametrize(
+    "msg, expected",
+    [
+        ("akash sharma ka balance batao", "akash sharma"),
+        ("verma traders ko 5000 udhaar likho", "verma traders"),
+        ("bajrang kirana stores ka phone 9876543210 save karo",
+         "bajrang kirana stores"),
+        ("Ramesh ko 500 udhaar likho", "Ramesh"),
+        ("Suresh ne 200 jama kiye", "Suresh"),
+    ],
+)
+def test_a_multi_word_party_is_looked_up_whole(msg, expected):
+    """Dropping a word posts money to the wrong, auto-created customer."""
+    assert parse(msg).party == expected
+
+
+def test_a_known_party_is_matched_even_without_a_postposition():
+    known = ["Bajrang Kirana Stores", "Ramesh"]
+    assert parse("balance of Bajrang Kirana Stores", known_parties=known).party \
+        == "Bajrang Kirana Stores"
+
+
+def test_the_longest_known_party_wins():
+    known = ["Ramesh", "Ramesh General Store"]
+    assert parse("Ramesh General Store ka balance", known_parties=known).party \
+        == "Ramesh General Store"
+
+
+def test_a_stop_word_shaped_party_name_is_not_matched_everywhere():
+    """A party literally named 'in' must not match inside every sentence."""
+    known = ["in", "Ramesh"]
+    assert parse("Ramesh ko 500 udhaar likho", known_parties=known).party == "Ramesh"

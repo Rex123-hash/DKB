@@ -60,6 +60,25 @@ _STOP = set(
 
 _POSTPOSITIONS = ("ko", "ne", "se", "ka", "ki", "ke")
 
+# Words that can open a sentence but never open a party name, so a run like
+# "mujhe akash sharma ka balance" is trimmed back to the name itself.
+_NOT_A_NAME_START = _STOP | {
+    "mujhe", "muje", "mera", "meri", "mere", "please", "plz", "zara", "bhai",
+    "sir", "ji", "aaj", "abhi", "phir", "toh", "bata", "batao", "dikhao",
+    "check", "karo", "kar", "do", "de", "dena", "likho", "likh", "add",
+    "update", "new", "naya", "nayi", "naye",
+    # Spoken numbers and times, so "paanch baje paanch sau" is never a name.
+    # Deliberately not in _STOP: a real customer may be called Das or Char,
+    # and the single-word fallback must still find them.
+    "ek", "teen", "char", "chaar", "paanch", "panch", "chhe", "che", "saat",
+    "aath", "nau", "das", "sau", "hazaar", "hazar", "paanso", "panso",
+    "paansau", "एक", "दो", "तीन", "चार", "पांच", "पाँच", "छह", "छे", "सात",
+    "आठ", "नौ", "दस", "सौ", "हज़ार", "हजार",
+}
+
+# One name ends and the next begins only at one of these.
+_NAME_SEPARATORS = re.compile(r"\s*(?:,|&|\baur\b|\band\b)\s*", re.I)
+
 
 @dataclass
 class Intent:
@@ -117,18 +136,59 @@ def _extract_amount(text: str) -> float | None:
     return _word_amount(text)  # fall back to spoken number words
 
 
-def _extract_party(text: str) -> str | None:
-    # 1) token right before a Hindi postposition: "Ramesh ko", "Suresh ne"
+def _match_known_party(text: str, known_parties) -> str | None:
+    """Prefer a party the shop already has, longest name first.
+
+    Matching a name that really exists beats guessing from word positions, and
+    it is the only way a name like "Bajrang Kirana Stores" is read whole.
+    """
+    if not known_parties:
+        return None
+    lowered = text.lower()
+    for name in sorted({n for n in known_parties if n}, key=len, reverse=True):
+        cleaned = name.strip()
+        # A party named "in" would otherwise match inside almost any sentence.
+        if len(cleaned) < 3 or cleaned.lower() in _STOP:
+            continue
+        if re.search(r"\b" + re.escape(cleaned.lower()) + r"\b", lowered):
+            return cleaned
+    return None
+
+
+def _trim_name(run: str) -> str | None:
+    """Keep only the name words of a captured run, dropping command words."""
+    tokens = re.findall(r"[A-Za-zऀ-ॿ]+", run)
+    while tokens and tokens[0].lower() in _NOT_A_NAME_START:
+        tokens.pop(0)
+    while tokens and tokens[-1].lower() in _STOP:
+        tokens.pop()
+    return " ".join(tokens) or None
+
+
+def _extract_party(text: str, known_parties=None) -> str | None:
+    # 0) a party the shop already knows, whatever shape its name is
+    known = _match_known_party(text, known_parties)
+    if known:
+        return known
+    # 1) the whole run of words before a Hindi postposition: "Verma Traders ko".
+    #    Capturing one word here posts money to a wrongly-named new customer.
     m = re.search(
-        r"([A-Za-zऀ-ॿ]+)\s+(?:" + "|".join(_POSTPOSITIONS) + r")\b",
+        r"([A-Za-zऀ-ॿ]+(?:\s+[A-Za-zऀ-ॿ]+)*)\s+(?:"
+        + "|".join(_POSTPOSITIONS) + r")\b",
         text, re.I,
     )
-    if m and m.group(1).lower() not in _STOP:
-        return m.group(1)
+    if m:
+        name = _trim_name(m.group(1))
+        if name and name.lower() not in _STOP:
+            return name
     # 2) English "to/for/of X"
-    m = re.search(r"\b(?:to|for|of)\s+([A-Za-zऀ-ॿ]+)", text, re.I)
-    if m and m.group(1).lower() not in _STOP:
-        return m.group(1)
+    m = re.search(
+        r"\b(?:to|for|of)\s+([A-Za-zऀ-ॿ]+(?:\s+[A-Za-zऀ-ॿ]+)*)", text, re.I
+    )
+    if m:
+        name = _trim_name(m.group(1))
+        if name and name.lower() not in _STOP:
+            return name
     # 3) fallback: first word that is not a stop-word / number
     for tok in re.findall(r"[A-Za-zऀ-ॿ]+", text):
         if tok.lower() not in _STOP:
@@ -149,14 +209,28 @@ def _is_set_phone(text: str) -> bool:
     return _has(text, PHONE_WORDS) and _extract_phone(text) is not None
 
 
+def _clean_name_tokens(segment: str) -> str | None:
+    """Drop command words from a segment and keep the rest as one name."""
+    tokens = [
+        tok
+        for tok in re.findall(r"[A-Za-zऀ-ॿ]+", segment)
+        if tok.lower() not in _NAME_NOISE and tok.lower() not in _STOP
+    ]
+    return " ".join(tokens) or None
+
+
 def _extract_names(message: str) -> list[str]:
-    """Pull party names out of a create command, preserving original casing."""
+    """Pull party names out of a create command, preserving original casing.
+
+    Only an explicit separator starts a new name. Splitting on whitespace
+    instead would read "verma traders" as two customers, which is how a single
+    shop ends up with a "Verma" and a "Traders" account.
+    """
     names = []
-    for tok in re.findall(r"[A-Za-zऀ-ॿ]+", message):
-        low = tok.lower()
-        if low in _NAME_NOISE or low in _STOP:
-            continue
-        names.append(tok)
+    for segment in _NAME_SEPARATORS.split(message):
+        name = _clean_name_tokens(segment)
+        if name:
+            names.append(name)
     return names
 
 
@@ -252,7 +326,7 @@ def _extract_due(text: str, now: datetime | None = None) -> str:
     return datetime.combine(due_date, due_time).isoformat(timespec="minutes")
 
 
-def parse(message: str) -> Intent:
+def parse(message: str, known_parties=None) -> Intent:
     text = (message or "").strip().lower()
     if not text:
         return Intent("unknown")
@@ -266,7 +340,7 @@ def parse(message: str) -> Intent:
         explicit_time = _extract_time_part(text)
         return Intent(
             "reminder",
-            party=_extract_party(message),
+            party=_extract_party(message, known_parties),
             amount=_extract_amount(cleaned),
             phone=_extract_phone(text),
             due_at=_extract_due(text),
@@ -285,10 +359,10 @@ def parse(message: str) -> Intent:
         )
 
     if _is_set_phone(text):
-        return Intent("set_phone", party=_extract_party(message), phone=_extract_phone(text))
+        return Intent("set_phone", party=_extract_party(message, known_parties), phone=_extract_phone(text))
 
     if _has(text, BALANCE_WORDS):
-        return Intent("balance", party=_extract_party(message))
+        return Intent("balance", party=_extract_party(message, known_parties))
     if _has(text, LIST_WORDS):
         return Intent("list")
 
@@ -297,6 +371,6 @@ def parse(message: str) -> Intent:
         # 'ne' + a give-verb means the party paid us back -> debit
         ne_payment = re.search(r"\bne\b.*\b(diya|diye|de diye|paid|jama)\b", text)
         txn_type = "debit" if (_has(text, DEBIT_WORDS) or ne_payment) else "credit"
-        return Intent("add", party=_extract_party(message), txn_type=txn_type, amount=amount)
+        return Intent("add", party=_extract_party(message, known_parties), txn_type=txn_type, amount=amount)
 
     return Intent("unknown")

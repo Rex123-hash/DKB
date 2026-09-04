@@ -189,7 +189,7 @@ def respond(
 
         # 3. Account creation is handled deterministically (works with or
         #    without an LLM key), then hands off to the phone sub-dialog.
-        intent = _parser.parse(message)
+        intent = _parser.parse(message, _known_party_names(conn))
         if intent.action == "create":
             return _start_create(intent, conn, session_id)
         if intent.action == "set_phone":
@@ -230,6 +230,18 @@ def respond(
         )
         if own_conn:
             conn.close()
+
+
+def _known_party_names(conn) -> list[str]:
+    """The shop's existing party names, so the parser can match one whole.
+
+    Without this a name like "Verma Traders" is read as "Traders" and money is
+    posted to a new customer that never existed.
+    """
+    try:
+        return [row["name"] for row in db.list_parties(conn)]
+    except Exception:
+        return []
 
 
 def _ask_phone(name: str, nxt: bool = False) -> str:
@@ -630,7 +642,7 @@ def _phone_from_previous_message(message: str, session_id: str) -> str | None:
 
 
 def _offline_respond(message: str, conn) -> str:
-    intent = _parser.parse(message)
+    intent = _parser.parse(message, _known_party_names(conn))
 
     if intent.action == "add":
         if not intent.party:
