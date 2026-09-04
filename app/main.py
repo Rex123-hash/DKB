@@ -279,6 +279,12 @@ def delete_party(party_id: int, conn=Depends(get_conn)) -> dict:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
+@app.get("/transactions")
+def list_transactions(limit: int = 100, conn=Depends(get_conn)) -> list[dict]:
+    """Recent entries across every party, for the Transactions screen."""
+    return [dict(row) for row in db.list_recent_transactions(conn, limit)]
+
+
 @app.post("/transactions")
 def add_transaction(t: TransactionIn, conn=Depends(get_conn)) -> dict:
     if db.get_party(conn, t.party_id) is None:

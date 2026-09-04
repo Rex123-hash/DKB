@@ -494,6 +494,21 @@ def delete_party(conn: sqlite3.Connection, party_id: int) -> dict:
     }
 
 
+def list_recent_transactions(conn: sqlite3.Connection, limit: int = 100):
+    """Every party's entries in one feed, newest first.
+
+    The home screen lists accounts; this is what "All Transactions" actually
+    means, so the two are no longer the same list under different headings.
+    """
+    limit = max(1, min(int(limit), 500))
+    return conn.execute(
+        'SELECT t.*, p.name AS party_name, p.type AS party_type '
+        'FROM "transaction" t JOIN party p ON p.id = t.party_id '
+        "ORDER BY t.id DESC LIMIT ?",
+        (limit,),
+    ).fetchall()
+
+
 def get_transactions(conn: sqlite3.Connection, party_id: int):
     return conn.execute(
         'SELECT * FROM "transaction" WHERE party_id = ? ORDER BY id DESC',

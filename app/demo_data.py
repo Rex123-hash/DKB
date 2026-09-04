@@ -4,7 +4,7 @@ Keeps the RAG knowledge base (kb_chunk) intact; only ledger data is touched.
 """
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 
 from app import db
 
@@ -40,4 +40,68 @@ def seed(conn) -> dict:
     due = (datetime.now() + timedelta(days=1)).replace(hour=10, minute=0, second=0, microsecond=0)
     db.add_reminder(conn, ramesh, due.isoformat(timespec="minutes"), "Ramesh se baaki payment lena")
 
-    return {"parties": 3, "reminders": 1}
+    bills = _seed_bills(conn)
+
+    return {"parties": 3, "reminders": 1, "bills": bills["bills"], "products": bills["products"]}
+
+
+def _seed_bills(conn) -> dict:
+    """Post one purchase and one sale through the real billing path.
+
+    Seeding rows directly would leave stock, cashbook and ledger disagreeing.
+    Posting real bills means the Stock, Bills and Cashbook screens show
+    consistent figures on a fresh deployment instead of three empty tabs.
+    """
+    from app.billing import repository as billing_repository
+    from app.billing.models import BillDraftData
+
+    today = date.today()
+    stocked = (today - timedelta(days=3)).isoformat()
+    sold = (today - timedelta(days=1)).isoformat()
+
+    drafts = [
+        {
+            "document_kind": "bill", "bill_type": "purchase",
+            "bill_number": "PUR-1042", "bill_date": stocked,
+            "party": {"name": "Verma Traders", "phone": "9876500011"},
+            "gst_mode": "non_gst", "payment_status": "paid",
+            "items": [
+                {"name": "Basmati Rice 5kg", "quantity": "20", "unit": "bag",
+                 "unit_price_paise": 42000},
+                {"name": "Sunflower Oil 1L", "quantity": "30", "unit": "pcs",
+                 "unit_price_paise": 14500},
+                {"name": "Toor Dal", "quantity": "25", "unit": "kg",
+                 "unit_price_paise": 11800},
+            ],
+        },
+        {
+            "document_kind": "bill", "bill_type": "sale",
+            "bill_number": "INV-2051", "bill_date": sold,
+            "party": {"name": "Ramesh", "phone": "9876543210"},
+            "gst_mode": "non_gst", "payment_status": "credit",
+            "items": [
+                {"name": "Basmati Rice 5kg", "quantity": "2", "unit": "bag",
+                 "unit_price_paise": 48000},
+                {"name": "Sunflower Oil 1L", "quantity": "3", "unit": "pcs",
+                 "unit_price_paise": 16500},
+            ],
+        },
+    ]
+
+    posted = 0
+    for index, payload in enumerate(drafts):
+        data = BillDraftData.model_validate(payload)
+        draft_id = billing_repository.create_draft(
+            conn,
+            session_id="demo",
+            source_filename=f"demo-{index}.jpg",
+            source_mime="image/jpeg",
+            source_path=f"demo-{index}.jpg",
+            source_sha256=f"demo-seed-{index}",
+        )
+        billing_repository.save_draft_data(conn, draft_id, data, backend="fake")
+        billing_repository.finalize_draft(conn, draft_id)
+        posted += 1
+
+    products = conn.execute("SELECT COUNT(*) FROM product").fetchone()[0]
+    return {"bills": posted, "products": products}

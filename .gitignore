@@ -23,3 +23,8 @@ data/bill_scans/
 # Editor folders
 .vscode/
 .idea/
+
+# Scratch output and local backups (never part of the app)
+output/
+tmp/
+*.db.backup-*

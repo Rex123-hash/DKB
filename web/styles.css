@@ -400,3 +400,9 @@ button:focus-visible,input:focus-visible,a:focus-visible{outline:3px solid rgba(
 .review-actions .btn-danger:hover{background:#c73125}
 .delete-effects{margin:8px 0 0;padding-left:18px;line-height:1.55}
 .delete-effects li{margin-bottom:3px}
+
+/* ---- inline "see more" link inside a section heading ---- */
+.section-title{display:flex;align-items:center;justify-content:space-between}
+.link-more{background:none;border:none;font-family:inherit;font-size:.8rem;
+  font-weight:600;color:var(--brand-deep,#0AA);cursor:pointer;padding:0}
+.link-more:hover{text-decoration:underline}

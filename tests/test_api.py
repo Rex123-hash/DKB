@@ -183,3 +183,23 @@ def test_speaking_is_unavailable_rather_than_silent_when_voice_is_off(client, mo
     monkeypatch.setattr(config, "has_voice", lambda: False)
     monkeypatch.setattr(main.config, "has_voice", lambda: False)
     assert client.post("/speak", json={"text": "hello"}).status_code == 503
+
+
+def test_recent_transactions_are_listed_across_every_party(client):
+    a = client.post("/parties", json={"name": "Ramesh", "type": "customer"}).json()["id"]
+    b = client.post("/parties", json={"name": "Verma Traders", "type": "supplier"}).json()["id"]
+    client.post("/transactions", json={"party_id": a, "type": "credit", "amount": 500})
+    client.post("/transactions", json={"party_id": b, "type": "debit", "amount": 300})
+
+    rows = client.get("/transactions").json()
+    assert len(rows) == 2
+    # Newest first, and each row names its party so the feed reads on its own.
+    assert {r["party_name"] for r in rows} == {"Ramesh", "Verma Traders"}
+    assert all("amount" in r and "type" in r and "txn_date" in r for r in rows)
+
+
+def test_the_transaction_feed_can_be_limited(client):
+    pid = client.post("/parties", json={"name": "Ramesh", "type": "customer"}).json()["id"]
+    for n in range(5):
+        client.post("/transactions", json={"party_id": pid, "type": "credit", "amount": 10 + n})
+    assert len(client.get("/transactions?limit=3").json()) == 3

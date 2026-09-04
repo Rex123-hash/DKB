@@ -289,11 +289,12 @@ function renderHome() {
       </div>
       <button class="fab" id="addParty">+</button>
     </div>
-    <div class="section-title">All Transactions</div>
+    <div class="section-title">All ${noun}<button class="link-more" id="seeTxns">Transactions ›</button></div>
     <div class="list" id="partyList">
       ${shown.length ? shown.map(rowHTML).join("") : emptyHTML(noun)}
     </div>`;
 
+  $("#seeTxns").onclick = () => openTransactions();
   $("#searchBox").addEventListener("input", (e) => { state.search = e.target.value; renderHome(); });
   $("#searchBox").focus && setCaretEnd($("#searchBox"));
   $("#addParty").onclick = () => addPartyModal();
@@ -410,6 +411,40 @@ function txnHTML(t) {
   return `<div class="txn"><div><div>${t.type === "credit" ? "Udhaar" : "Payment"}${note}</div>
       <div class="d">${(t.txn_date || "").slice(0, 10)}</div></div>
       <div class="a ${cls}">${sign}${fmt(t.amount)}</div></div>`;
+}
+
+/* ---------- ALL TRANSACTIONS (every party's entries in one feed) ---------- */
+async function openTransactions() {
+  view().classList.remove("chat-screen");
+  $("#tabs").style.display = "none";
+  setActive("home");
+  view().innerHTML = `<div class="spinner"></div>`;
+  let rows = [];
+  try { rows = await api("/transactions?limit=100"); }
+  catch { return toast("Transactions load nahi ho paye"); }
+
+  const given = rows.filter((r) => r.type === "credit").reduce((s, r) => s + Number(r.amount), 0);
+  const taken = rows.filter((r) => r.type === "debit").reduce((s, r) => s + Number(r.amount), 0);
+
+  view().innerHTML = `
+    <div class="detail-head"><button class="back" id="back" aria-label="Back">${chatIcon("back")}</button>
+      <div><div class="screen-title">All Transactions</div>
+        <div class="screen-sub">${rows.length} entries · har khaate ki</div></div></div>
+    <div class="stats">
+      <div class="col"><div class="n get">${fmt(given)}</div><div class="t">Udhaar diya</div></div>
+      <div class="col"><div class="n red">${fmt(taken)}</div><div class="t">Payment mila</div></div>
+    </div>
+    ${rows.length ? `<div class="list">${rows.map((t) => `
+      <div class="txn"><div>
+          <div><b>${esc(t.party_name)}</b>${t.note ? " · " + esc(t.note) : ""}</div>
+          <div class="d">${t.type === "credit" ? "Udhaar" : "Payment"} · ${(t.txn_date || "").slice(0, 10)}</div>
+        </div>
+        <div class="a ${t.type === "credit" ? "get" : "give"}">${t.type === "credit" ? "+" : "−"}${fmt(t.amount)}</div>
+      </div>`).join("")}</div>`
+    : `<div class="empty"><div class="em-ico">${chatIcon("receipt")}</div>
+        <div class="em-title">Abhi koi transaction nahi</div>
+        <div class="em-sub">Khaate mein udhaar ya payment likhte hi yahan dikhega.</div></div>`}`;
+  $("#back").onclick = () => { state.nav = "home"; render(); };
 }
 
 /* ---------- STOCK (updated automatically by confirmed bills) ---------- */
@@ -644,7 +679,9 @@ async function openCashbook() {
 /* ---------- MENU ---------- */
 function renderMenu() {
   const items = [
-    ["profile", "Profile"], ["book", "Cashbook"], ["clock", "Reminders / Call requests", () => openReminders()],
+    ["profile", "Profile"], ["book", "Cashbook", () => openCashbook()],
+    ["clock", "Reminders / Call requests", () => openReminders()],
+    ["receipt", "All Transactions", () => openTransactions()],
     ["message", "AI Assistant", () => openChat()], ["trash", "Bin"], ["card", "Visiting Cards"],
     ["phone", "Call Us"], ["envelope", "Mail Us"],
   ];
@@ -1513,7 +1550,7 @@ document.querySelectorAll(".bn-item").forEach((b) =>
 $("#navChat").onclick = () => openChat();
 $("#navAI").onclick = () => openChat();
 $("#navReminders").onclick = () => openReminders();
-$("#navTxns").onclick = () => { state.nav = "home"; render(); };
+$("#navTxns").onclick = () => openTransactions();
 
 /* ---------- go ---------- */
 refresh();
